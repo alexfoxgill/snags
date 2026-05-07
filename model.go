@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -42,6 +43,7 @@ type Model struct {
 	projectRoot   string
 	defaultBranch string
 	width         int
+	cancelWork    context.CancelFunc
 }
 
 func New(projectRoot, defaultBranch string, state State) Model {
@@ -95,7 +97,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case startWorkMsg:
 		var cmd tea.Cmd
 		m, cmd = m.startNextSnag()
-		cmds = append(cmds, cmd)
+		cmds = append(cmds, saveCmd(m.projectRoot, m.state), cmd)
 
 	case snagDoneMsg:
 		m.working = false
@@ -120,7 +122,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch {
 		case key.Matches(msg, keys.Quit):
-			return m, tea.Quit
+			return m.quit()
 
 		case key.Matches(msg, keys.PauseResume):
 			m.paused = !m.paused
@@ -200,7 +202,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.input.Value() != "" {
 					m.input.SetValue("")
 				} else {
-					return m, tea.Quit
+					return m.quit()
 				}
 			}
 
@@ -226,10 +228,26 @@ func (m Model) startNextSnag() (Model, tea.Cmd) {
 		if m.state.Snags[i].Status == StatusPending {
 			m.state.Snags[i].Status = StatusInflight
 			m.working = true
-			return m, RunSnag(m.projectRoot, m.defaultBranch, m.state.Snags[i])
+			ctx, cancel := context.WithCancel(context.Background())
+			m.cancelWork = cancel
+			return m, RunSnag(ctx, m.projectRoot, m.defaultBranch, m.state.Snags[i])
 		}
 	}
 	return m, nil
+}
+
+func (m Model) quit() (tea.Model, tea.Cmd) {
+	if m.cancelWork != nil {
+		m.cancelWork()
+	}
+	for i := range m.state.Snags {
+		if m.state.Snags[i].Status == StatusInflight {
+			m.state.Snags[i].Status = StatusPending
+			break
+		}
+	}
+	SaveState(m.projectRoot, m.state)
+	return m, tea.Quit
 }
 
 func saveCmd(projectRoot string, state State) tea.Cmd {

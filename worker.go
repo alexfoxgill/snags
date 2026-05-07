@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -45,8 +46,13 @@ func worktreePath(projectRoot, snagID string) string {
 }
 
 func createWorktree(projectRoot, snagID, defaultBranch string) error {
+	path := worktreePath(projectRoot, snagID)
+	// Defensive cleanup in case a prior run crashed and left an orphan
+	exec.Command("git", "-C", projectRoot, "worktree", "remove", "--force", path).Run()
+	exec.Command("git", "-C", projectRoot, "branch", "-D", "snag/"+snagID).Run()
+
 	cmd := exec.Command("git", "-C", projectRoot, "worktree", "add",
-		worktreePath(projectRoot, snagID), "-b", "snag/"+snagID, defaultBranch)
+		path, "-b", "snag/"+snagID, defaultBranch)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("worktree add: %s: %s", err, strings.TrimSpace(string(out)))
@@ -71,9 +77,9 @@ Complete the task fully. Your final response must be a JSON object with:
 - "notes": any assumptions you made, decisions you took, or (if failed) why you could not complete it`, description)
 }
 
-func runClaudeHeadless(dir, prompt string) (success bool, notes string, err error) {
+func runClaudeHeadless(ctx context.Context, dir, prompt string) (success bool, notes string, err error) {
 	const schema = `{"type":"object","properties":{"status":{"type":"string","enum":["success","failed"]},"notes":{"type":"string"}},"required":["status"]}`
-	cmd := exec.Command("claude",
+	cmd := exec.CommandContext(ctx, "claude",
 		"--model", "claude-sonnet-4-6",
 		"-p", prompt,
 		"--output-format", "json",
@@ -85,6 +91,9 @@ func runClaudeHeadless(dir, prompt string) (success bool, notes string, err erro
 	cmd.Dir = dir
 	out, runErr := cmd.Output()
 	if runErr != nil {
+		if ctx.Err() != nil {
+			return false, "cancelled", nil
+		}
 		stderr := ""
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
 			stderr = strings.TrimSpace(string(exitErr.Stderr))
@@ -131,13 +140,13 @@ func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) 
 	return nil
 }
 
-func runConflictResolver(projectRoot, snagID, description string) error {
+func runConflictResolver(ctx context.Context, projectRoot, snagID, description string) error {
 	prompt := fmt.Sprintf(
 		"A git merge --squash conflict occurred while merging branch snag/%s. "+
 			"Resolve the conflicts in the working tree, then run: git commit -m \"snag: %s\"",
 		snagID, description,
 	)
-	success, notes, err := runClaudeHeadless(projectRoot, prompt)
+	success, notes, err := runClaudeHeadless(ctx, projectRoot, prompt)
 	if err != nil {
 		return err
 	}
@@ -147,24 +156,28 @@ func runConflictResolver(projectRoot, snagID, description string) error {
 	return nil
 }
 
-func RunSnag(projectRoot, defaultBranch string, snag Snag) tea.Cmd {
+func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) tea.Cmd {
 	return func() tea.Msg {
 		if err := createWorktree(projectRoot, snag.ID, defaultBranch); err != nil {
 			return snagDoneMsg{snagID: snag.ID, success: false, notes: err.Error()}
 		}
 
-		success, notes, err := runClaudeHeadless(worktreePath(projectRoot, snag.ID), buildPrompt(snag.Description))
+		success, notes, err := runClaudeHeadless(ctx, worktreePath(projectRoot, snag.ID), buildPrompt(snag.Description))
 		if err != nil {
 			removeWorktree(projectRoot, snag.ID)
 			return snagDoneMsg{snagID: snag.ID, success: false, notes: err.Error()}
 		}
 		if !success {
+			if ctx.Err() != nil {
+				// Cancelled by user — don't clean up worktree, snag will be reset to pending
+				return snagDoneMsg{snagID: snag.ID, success: false, notes: "cancelled"}
+			}
 			removeWorktree(projectRoot, snag.ID)
 			return snagDoneMsg{snagID: snag.ID, success: false, notes: notes}
 		}
 
 		if mergeErr := squashMerge(projectRoot, snag.ID, snag.Description, notes, defaultBranch); mergeErr != nil {
-			if resolveErr := runConflictResolver(projectRoot, snag.ID, snag.Description); resolveErr != nil {
+			if resolveErr := runConflictResolver(ctx, projectRoot, snag.ID, snag.Description); resolveErr != nil {
 				return snagDoneMsg{snagID: snag.ID, success: false,
 					notes: fmt.Sprintf("merge conflict unresolved: %s", resolveErr)}
 			}
