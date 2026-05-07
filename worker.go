@@ -101,8 +101,20 @@ func runClaudeHeadless(dir, prompt string) (success bool, notes string, err erro
 	return result.StructuredOutput.Status == "success", result.StructuredOutput.Notes, nil
 }
 
-func squashMerge(projectRoot, snagID, description, notes string) error {
-	cmd := exec.Command("git", "merge", "--squash", "snag/"+snagID)
+func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) error {
+	// Verify we're on the default branch before merging
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = projectRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("could not determine current branch: %s", err)
+	}
+	currentBranch := strings.TrimSpace(string(out))
+	if currentBranch != defaultBranch {
+		return fmt.Errorf("not on %s (currently on %s) — switch to %s before running snags", defaultBranch, currentBranch, defaultBranch)
+	}
+
+	cmd = exec.Command("git", "merge", "--squash", "snag/"+snagID)
 	cmd.Dir = projectRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
@@ -151,7 +163,7 @@ func RunSnag(projectRoot, defaultBranch string, snag Snag) tea.Cmd {
 			return snagDoneMsg{snagID: snag.ID, success: false, notes: notes}
 		}
 
-		if mergeErr := squashMerge(projectRoot, snag.ID, snag.Description, notes); mergeErr != nil {
+		if mergeErr := squashMerge(projectRoot, snag.ID, snag.Description, notes, defaultBranch); mergeErr != nil {
 			if resolveErr := runConflictResolver(projectRoot, snag.ID, snag.Description); resolveErr != nil {
 				return snagDoneMsg{snagID: snag.ID, success: false,
 					notes: fmt.Sprintf("merge conflict unresolved: %s", resolveErr)}

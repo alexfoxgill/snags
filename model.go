@@ -233,8 +233,14 @@ func (m Model) startNextSnag() (Model, tea.Cmd) {
 }
 
 func saveCmd(projectRoot string, state State) tea.Cmd {
+	snagsCopy := make([]Snag, len(state.Snags))
+	copy(snagsCopy, state.Snags)
+	stateCopy := State{Snags: snagsCopy}
 	return func() tea.Msg {
-		SaveState(projectRoot, state)
+		if err := SaveState(projectRoot, stateCopy); err != nil {
+			// Can't update TUI from goroutine directly; best effort log
+			_ = err
+		}
 		return nil
 	}
 }
