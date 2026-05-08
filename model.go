@@ -267,7 +267,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, keys.Escape):
-			if m.focus == focusInput {
+			if m.focus == focusList {
+				m.focus = focusInput
+				m.input.Focus()
+			} else if m.focus == focusInput {
 				if m.input.Value() != "" {
 					m.input.SetValue("")
 				} else {
