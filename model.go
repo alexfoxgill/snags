@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -346,11 +347,12 @@ func (m Model) View() string {
 	// Title bar
 	status := m.workerStatusStr()
 	title := titleStyle.Render("snags")
-	pad := m.width - len("snags") - len(status) - 2
+	short := shortenPath(m.projectRoot)
+	pad := m.width - len("snags") - 1 - len(short) - len(status) - 2
 	if pad < 1 {
 		pad = 1
 	}
-	sb.WriteString(title + strings.Repeat(" ", pad) + faintStyle.Render(status) + "\n")
+	sb.WriteString(title + " " + faintStyle.Render(short) + strings.Repeat(" ", pad) + faintStyle.Render(status) + "\n")
 	sb.WriteString(strings.Repeat("─", m.width) + "\n")
 
 	// Snag list
@@ -436,4 +438,15 @@ func (m Model) statusBarStr() string {
 		return "claude: " + m.currentActivity
 	}
 	return "↑↓ navigate  backspace delete  ctrl+p pause/resume  esc clear/quit"
+}
+
+func shortenPath(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if strings.HasPrefix(p, home) {
+		return "~" + p[len(home):]
+	}
+	return p
 }
