@@ -86,7 +86,6 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string) (success bool, n
 		"--json-schema", schema,
 		"--permission-mode", "auto",
 		"--settings", `{"autoMode":{"environment":["$defaults"]}}`,
-		"--no-update-notification",
 	)
 	cmd.Dir = dir
 	out, runErr := cmd.Output()

@@ -10,6 +10,7 @@ type keyMap struct {
 	Escape      key.Binding
 	PauseResume key.Binding
 	Quit        key.Binding
+	Retry       key.Binding
 }
 
 var keys = keyMap{
@@ -40,5 +41,9 @@ var keys = keyMap{
 	Quit: key.NewBinding(
 		key.WithKeys("ctrl+c"),
 		key.WithHelp("ctrl+c", "quit"),
+	),
+	Retry: key.NewBinding(
+		key.WithKeys("r"),
+		key.WithHelp("r", "retry failed"),
 	),
 }

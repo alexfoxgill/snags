@@ -224,6 +224,53 @@ func TestSnagDoneMsgFailure(t *testing.T) {
 	}
 }
 
+// --- Retry ---
+
+func TestRetryFailedSnag(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusFailed, Description: "the task", Notes: "could not find file"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+
+	var found *Snag
+	for i := range m.state.Snags {
+		if m.state.Snags[i].ID == "abc" {
+			found = &m.state.Snags[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("snag not found")
+	}
+	if found.Status != StatusPending {
+		t.Errorf("expected pending after retry, got %q", found.Status)
+	}
+	if found.Notes != "" {
+		t.Errorf("expected notes cleared after retry, got %q", found.Notes)
+	}
+}
+
+func TestRetryOnlyWorksForFailed(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusPending, Description: "the task"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+
+	if m.state.Snags[0].Status != StatusPending {
+		t.Errorf("pressing r on pending snag should not change status, got %q", m.state.Snags[0].Status)
+	}
+}
+
+func TestRetryInInputForwardsToInput(t *testing.T) {
+	m := newTestModel(nil)
+	// focus is on input by default
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if m.input.Value() != "r" {
+		t.Errorf("expected 'r' to be typed in input, got %q", m.input.Value())
+	}
+}
+
 // --- Visible snags filter ---
 
 func TestCompleteSnagsHidden(t *testing.T) {

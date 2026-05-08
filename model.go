@@ -181,6 +181,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				forwardToInput = true
 			}
 
+		case key.Matches(msg, keys.Retry):
+			if m.focus == focusList {
+				visible := m.visibleSnags()
+				if m.cursor < len(visible) && visible[m.cursor].Status == StatusFailed {
+					id := visible[m.cursor].ID
+					for i := range m.state.Snags {
+						if m.state.Snags[i].ID == id {
+							m.state.Snags[i].Status = StatusPending
+							m.state.Snags[i].Notes = ""
+							break
+						}
+					}
+					cmds = append(cmds, saveCmd(m.projectRoot, m.state))
+					if !m.working && !m.paused {
+						cmds = append(cmds, func() tea.Msg { return startWorkMsg{} })
+					}
+				}
+			} else {
+				forwardToInput = true
+			}
+
 		case key.Matches(msg, keys.Enter):
 			if m.focus == focusInput && m.input.Value() != "" {
 				snag := Snag{
@@ -353,8 +374,11 @@ func (m Model) statusBarStr() string {
 		visible := m.visibleSnags()
 		if m.cursor < len(visible) {
 			s := visible[m.cursor]
-			if s.Status == StatusFailed && s.Notes != "" {
-				return "✗ " + s.Notes
+			if s.Status == StatusFailed {
+				if s.Notes != "" {
+					return "✗ " + s.Notes + "  r retry"
+				}
+				return "r retry"
 			}
 		}
 	}
