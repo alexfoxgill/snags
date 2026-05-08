@@ -32,6 +32,7 @@ type streamLine struct {
 	Message struct {
 		Content []struct {
 			Type  string          `json:"type"`
+			Text  string          `json:"text"`
 			Name  string          `json:"name"`
 			Input json.RawMessage `json:"input"`
 		} `json:"content"`
@@ -178,12 +179,24 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(
 				break
 			}
 			for _, block := range line.Message.Content {
-				if block.Type == "tool_use" {
+				var activity string
+				switch block.Type {
+				case "tool_use":
 					detail := extractToolDetail(block.Name, string(block.Input))
-					activity := block.Name
+					activity = block.Name
 					if detail != "" {
 						activity = block.Name + "(" + detail + ")"
 					}
+				case "text":
+					if block.Text != "" {
+						t := strings.ReplaceAll(block.Text, "\n", " ")
+						if len(t) > 60 {
+							t = t[:57] + "..."
+						}
+						activity = t
+					}
+				}
+				if activity != "" {
 					select {
 					case <-ctx.Done():
 					default:
