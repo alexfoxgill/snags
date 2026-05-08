@@ -521,6 +521,19 @@ func (m Model) renderRow(s Snag, pos int, selected bool) string {
 		line += faintStyle.Render("  " + elapsed)
 	}
 
+	if s.Status == StatusInflight && m.working {
+		var parts []string
+		if m.currentText != "" {
+			parts = append(parts, m.currentText)
+		}
+		if m.currentTool != "" {
+			parts = append(parts, m.currentTool)
+		}
+		if len(parts) > 0 {
+			line += "\n       " + faintStyle.Render(strings.Join(parts, "  ·  "))
+		}
+	}
+
 	return line
 }
 
@@ -549,19 +562,8 @@ func (m Model) statusBarStr() string {
 			if s.Status == StatusPending {
 				return "e edit  backspace delete  ↑↓ navigate  alt+↑↓ reorder"
 			}
-			if s.Status == StatusInflight && m.working {
-				elapsed := time.Since(m.inflightStart).Round(time.Second).String()
-				var parts []string
-				if m.currentText != "" {
-					parts = append(parts, m.currentText)
-				}
-				if m.currentTool != "" {
-					parts = append(parts, m.currentTool)
-				}
-				if len(parts) > 0 {
-					return strings.Join(parts, "  ·  ") + "  " + elapsed
-				}
-				return elapsed
+			if s.Status == StatusInflight {
+				return "↑↓ navigate"
 			}
 		}
 	}
