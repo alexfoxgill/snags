@@ -459,6 +459,11 @@ func (m Model) renderRow(s Snag, selected bool) string {
 		line = boldStyle.Render(line)
 	}
 
+	if s.Status == StatusInflight && !m.inflightStart.IsZero() {
+		elapsed := time.Since(m.inflightStart).Round(time.Second).String()
+		line += faintStyle.Render("  " + elapsed)
+	}
+
 	return line
 }
 
