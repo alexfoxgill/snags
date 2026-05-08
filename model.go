@@ -52,6 +52,7 @@ type Model struct {
 	currentText          string
 	inflightStart        time.Time
 	sessionCompletedIDs  map[string]bool
+	lastTitle            string
 }
 
 func waitForSnagEvent(ch chan tea.Msg) tea.Cmd {
@@ -68,7 +69,7 @@ func New(projectRoot, defaultBranch string, state State, startPaused bool) Model
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
 
-	return Model{
+	m := Model{
 		state:               state,
 		focus:               focusInput,
 		input:               ti,
@@ -79,6 +80,8 @@ func New(projectRoot, defaultBranch string, state State, startPaused bool) Model
 		width:               80,
 		sessionCompletedIDs: make(map[string]bool),
 	}
+	m.lastTitle = m.windowTitle()
+	return m
 }
 
 func (m Model) visibleSnags() []Snag {
@@ -374,7 +377,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	cmds = append(cmds, tea.SetWindowTitle(m.windowTitle()))
+	// Only emit a SetWindowTitle when the title actually changes. Emitting
+	// unconditionally causes a feedback loop: bubbletea dispatches the
+	// resulting setWindowTitleMsg back through Update, which produces yet
+	// another SetWindowTitle, pegging the CPU and flooding the terminal with
+	// OSC sequences.
+	if title := m.windowTitle(); title != m.lastTitle {
+		m.lastTitle = title
+		cmds = append(cmds, tea.SetWindowTitle(title))
+	}
 	return m, tea.Batch(cmds...)
 }
 
