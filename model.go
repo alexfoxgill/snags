@@ -218,6 +218,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				forwardToInput = true
 			}
 
+		case key.Matches(msg, keys.Edit):
+			if m.focus == focusList {
+				visible := m.visibleSnags()
+				if m.cursor < len(visible) && visible[m.cursor].Status == StatusPending {
+					snag := visible[m.cursor]
+					var snags []Snag
+					for _, s := range m.state.Snags {
+						if s.ID != snag.ID {
+							snags = append(snags, s)
+						}
+					}
+					m.state.Snags = snags
+					m.input.SetValue(snag.Description)
+					m.focus = focusInput
+					m.input.Focus()
+					visible2 := m.visibleSnags()
+					if m.cursor >= len(visible2) && m.cursor > 0 {
+						m.cursor = len(visible2) - 1
+					}
+					if len(visible2) == 0 {
+						m.cursor = 0
+					}
+					m.clampView()
+					cmds = append(cmds, saveCmd(m.projectRoot, m.state))
+				}
+			} else {
+				forwardToInput = true
+			}
+
 		case key.Matches(msg, keys.Enter):
 			if m.focus == focusInput && m.input.Value() != "" {
 				snag := Snag{
@@ -397,6 +426,9 @@ func (m Model) statusBarStr() string {
 					return "✗ " + s.Notes + "  r retry"
 				}
 				return "r retry"
+			}
+			if s.Status == StatusPending {
+				return "e edit  backspace delete  ↑↓ navigate"
 			}
 		}
 	}

@@ -11,6 +11,7 @@ type keyMap struct {
 	PauseResume key.Binding
 	Quit        key.Binding
 	Retry       key.Binding
+	Edit        key.Binding
 }
 
 var keys = keyMap{
@@ -45,5 +46,9 @@ var keys = keyMap{
 	Retry: key.NewBinding(
 		key.WithKeys("r"),
 		key.WithHelp("r", "retry failed"),
+	),
+	Edit: key.NewBinding(
+		key.WithKeys("e"),
+		key.WithHelp("e", "edit snag"),
 	),
 }
