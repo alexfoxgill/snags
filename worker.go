@@ -87,6 +87,7 @@ func removeWorktree(projectRoot, snagID string) {
 func buildPrompt(description string) string {
 	return fmt.Sprintf(`You are working autonomously in a git worktree to complete a small code change (a "snag").
 The project is already checked out. Do not ask for clarification — use your best judgement.
+If the request is ambiguous, pick the most plausible interpretation, do it, and explain the choice in notes.
 
 Snag: %s
 
