@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,7 +19,27 @@ type snagDoneMsg struct {
 	notes   string
 }
 
-type claudeOutput struct {
+type snagProgressMsg struct {
+	snagID   string
+	activity string
+}
+
+// streamLine is a parsed line from --output-format stream-json
+type streamLine struct {
+	Type    string `json:"type"`
+	Subtype string `json:"subtype"`
+	Event   struct {
+		Type  string `json:"type"`
+		Index int    `json:"index"`
+		ContentBlock struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		} `json:"content_block"`
+		Delta struct {
+			Type        string `json:"type"`
+			PartialJSON string `json:"partial_json"`
+		} `json:"delta"`
+	} `json:"event"`
 	StructuredOutput struct {
 		Status string `json:"status"`
 		Notes  string `json:"notes"`
@@ -77,36 +99,127 @@ Complete the task fully. Your final response must be a JSON object with:
 - "notes": any assumptions you made, decisions you took, or (if failed) why you could not complete it`, description)
 }
 
-func runClaudeHeadless(ctx context.Context, dir, prompt string) (success bool, notes string, err error) {
+// extractToolDetail returns a short human-readable detail string for the given tool and its JSON input.
+func extractToolDetail(toolName, inputJSON string) string {
+	var m map[string]interface{}
+	if json.Unmarshal([]byte(inputJSON), &m) != nil {
+		return ""
+	}
+	var key string
+	switch toolName {
+	case "Bash":
+		key = "command"
+	case "Edit", "Write", "Read", "MultiEdit":
+		key = "file_path"
+	case "WebSearch":
+		key = "query"
+	case "WebFetch":
+		key = "url"
+	default:
+		return ""
+	}
+	v, _ := m[key].(string)
+	if len(v) > 50 {
+		v = v[:47] + "..."
+	}
+	return v
+}
+
+// runClaudeHeadless runs claude headless in dir with the given prompt.
+// onActivity is called with a short description each time a tool is invoked (may be nil).
+func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(string)) (success bool, notes string, err error) {
 	const schema = `{"type":"object","properties":{"status":{"type":"string","enum":["success","failed"]},"notes":{"type":"string"}},"required":["status"]}`
 	cmd := exec.CommandContext(ctx, "claude",
 		"--model", "claude-sonnet-4-6",
 		"-p", prompt,
-		"--output-format", "json",
+		"--output-format", "stream-json",
+		"--verbose",
 		"--json-schema", schema,
 		"--permission-mode", "auto",
 		"--settings", `{"autoMode":{"environment":["$defaults"]}}`,
 	)
 	cmd.Dir = dir
-	out, runErr := cmd.Output()
-	if runErr != nil {
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	stdout, pipeErr := cmd.StdoutPipe()
+	if pipeErr != nil {
+		return false, pipeErr.Error(), nil
+	}
+	if startErr := cmd.Start(); startErr != nil {
 		if ctx.Err() != nil {
 			return false, "cancelled", nil
 		}
-		stderr := ""
-		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(exitErr.Stderr))
+		return false, startErr.Error(), nil
+	}
+
+	var (
+		currentTool     string
+		currentInputBuf strings.Builder
+		currentIndex    = -1
+		resultSuccess   bool
+		resultNotes     string
+		foundResult     bool
+	)
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		var line streamLine
+		if json.Unmarshal(scanner.Bytes(), &line) != nil {
+			continue
+		}
+		switch line.Type {
+		case "stream_event":
+			switch line.Event.Type {
+			case "content_block_start":
+				if line.Event.ContentBlock.Type == "tool_use" {
+					currentTool = line.Event.ContentBlock.Name
+					currentInputBuf.Reset()
+					currentIndex = line.Event.Index
+				}
+			case "content_block_delta":
+				if line.Event.Index == currentIndex && line.Event.Delta.Type == "input_json_delta" {
+					currentInputBuf.WriteString(line.Event.Delta.PartialJSON)
+				}
+			case "content_block_stop":
+				if line.Event.Index == currentIndex && currentTool != "" {
+					if onActivity != nil {
+						detail := extractToolDetail(currentTool, currentInputBuf.String())
+						activity := currentTool
+						if detail != "" {
+							activity = currentTool + "(" + detail + ")"
+						}
+						onActivity(activity)
+					}
+					currentTool = ""
+					currentIndex = -1
+				}
+			}
+		case "result":
+			foundResult = true
+			resultSuccess = line.StructuredOutput.Status == "success"
+			resultNotes = line.StructuredOutput.Notes
+		}
+	}
+
+	waitErr := cmd.Wait()
+	if !foundResult {
+		if ctx.Err() != nil {
+			return false, "cancelled", nil
+		}
+		stderr := strings.TrimSpace(stderrBuf.String())
+		if stderr == "" && waitErr != nil {
+			stderr = waitErr.Error()
 		}
 		if stderr == "" {
-			stderr = runErr.Error()
+			stderr = "no result from claude"
 		}
 		return false, stderr, nil
 	}
-	var result claudeOutput
-	if jsonErr := json.Unmarshal(out, &result); jsonErr != nil {
-		return false, fmt.Sprintf("failed to parse claude output: %s", jsonErr), nil
-	}
-	return result.StructuredOutput.Status == "success", result.StructuredOutput.Notes, nil
+
+	return resultSuccess, resultNotes, nil
 }
 
 func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) error {
@@ -145,7 +258,7 @@ func runConflictResolver(ctx context.Context, projectRoot, snagID, description s
 			"Resolve the conflicts in the working tree, then run: git commit -m \"snag: %s\"",
 		snagID, description,
 	)
-	success, notes, err := runClaudeHeadless(ctx, projectRoot, prompt)
+	success, notes, err := runClaudeHeadless(ctx, projectRoot, prompt, nil)
 	if err != nil {
 		return err
 	}
@@ -155,34 +268,49 @@ func runConflictResolver(ctx context.Context, projectRoot, snagID, description s
 	return nil
 }
 
-func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) tea.Cmd {
-	return func() tea.Msg {
+// RunSnag starts the snag pipeline in a goroutine and returns a channel of events.
+// The channel carries snagProgressMsg (activity updates) and a final snagDoneMsg.
+func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) chan tea.Msg {
+	ch := make(chan tea.Msg, 64)
+	go func() {
 		if err := createWorktree(projectRoot, snag.ID, defaultBranch); err != nil {
-			return snagDoneMsg{snagID: snag.ID, success: false, notes: err.Error()}
+			ch <- snagDoneMsg{snagID: snag.ID, success: false, notes: err.Error()}
+			return
 		}
 
-		success, notes, err := runClaudeHeadless(ctx, worktreePath(projectRoot, snag.ID), buildPrompt(snag.Description))
+		onActivity := func(activity string) {
+			select {
+			case ch <- snagProgressMsg{snagID: snag.ID, activity: activity}:
+			default:
+			}
+		}
+
+		success, notes, err := runClaudeHeadless(ctx, worktreePath(projectRoot, snag.ID), buildPrompt(snag.Description), onActivity)
 		if err != nil {
 			removeWorktree(projectRoot, snag.ID)
-			return snagDoneMsg{snagID: snag.ID, success: false, notes: err.Error()}
+			ch <- snagDoneMsg{snagID: snag.ID, success: false, notes: err.Error()}
+			return
 		}
 		if !success {
 			if ctx.Err() != nil {
-				// Cancelled by user — don't clean up worktree, snag will be reset to pending
-				return snagDoneMsg{snagID: snag.ID, success: false, notes: "cancelled"}
+				ch <- snagDoneMsg{snagID: snag.ID, success: false, notes: "cancelled"}
+				return
 			}
 			removeWorktree(projectRoot, snag.ID)
-			return snagDoneMsg{snagID: snag.ID, success: false, notes: notes}
+			ch <- snagDoneMsg{snagID: snag.ID, success: false, notes: notes}
+			return
 		}
 
 		if mergeErr := squashMerge(projectRoot, snag.ID, snag.Description, notes, defaultBranch); mergeErr != nil {
 			if resolveErr := runConflictResolver(ctx, projectRoot, snag.ID, snag.Description); resolveErr != nil {
-				return snagDoneMsg{snagID: snag.ID, success: false,
+				ch <- snagDoneMsg{snagID: snag.ID, success: false,
 					notes: fmt.Sprintf("merge conflict unresolved: %s", resolveErr)}
+				return
 			}
 		}
 
 		removeWorktree(projectRoot, snag.ID)
-		return snagDoneMsg{snagID: snag.ID, success: true, notes: notes}
-	}
+		ch <- snagDoneMsg{snagID: snag.ID, success: true, notes: notes}
+	}()
+	return ch
 }

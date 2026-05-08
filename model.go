@@ -32,18 +32,26 @@ var (
 )
 
 type Model struct {
-	state         State
-	cursor        int
-	viewOffset    int
-	focus         focusArea
-	input         textinput.Model
-	spinner       spinner.Model
-	paused        bool
-	working       bool
-	projectRoot   string
-	defaultBranch string
-	width         int
-	cancelWork    context.CancelFunc
+	state           State
+	cursor          int
+	viewOffset      int
+	focus           focusArea
+	input           textinput.Model
+	spinner         spinner.Model
+	paused          bool
+	working         bool
+	projectRoot     string
+	defaultBranch   string
+	width           int
+	cancelWork      context.CancelFunc
+	streamCh        chan tea.Msg
+	currentActivity string
+}
+
+func waitForSnagEvent(ch chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		return <-ch
+	}
 }
 
 func New(projectRoot, defaultBranch string, state State) Model {
@@ -99,8 +107,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m, cmd = m.startNextSnag()
 		cmds = append(cmds, saveCmd(m.projectRoot, m.state), cmd)
 
+	case snagProgressMsg:
+		m.currentActivity = msg.activity
+		if m.streamCh != nil {
+			cmds = append(cmds, waitForSnagEvent(m.streamCh))
+		}
+
 	case snagDoneMsg:
 		m.working = false
+		m.currentActivity = ""
+		m.streamCh = nil
 		for i := range m.state.Snags {
 			if m.state.Snags[i].ID == msg.snagID {
 				if msg.success {
@@ -251,7 +267,9 @@ func (m Model) startNextSnag() (Model, tea.Cmd) {
 			m.working = true
 			ctx, cancel := context.WithCancel(context.Background())
 			m.cancelWork = cancel
-			return m, RunSnag(ctx, m.projectRoot, m.defaultBranch, m.state.Snags[i])
+			ch := RunSnag(ctx, m.projectRoot, m.defaultBranch, m.state.Snags[i])
+			m.streamCh = ch
+			return m, waitForSnagEvent(ch)
 		}
 	}
 	return m, nil
@@ -381,6 +399,9 @@ func (m Model) statusBarStr() string {
 				return "r retry"
 			}
 		}
+	}
+	if m.working && m.currentActivity != "" {
+		return "claude: " + m.currentActivity
 	}
 	return "↑↓ navigate  backspace delete  ctrl+p pause/resume  esc clear/quit"
 }
