@@ -418,7 +418,7 @@ func (m Model) View() string {
 		}
 		for i, snag := range visible[m.viewOffset:end] {
 			selected := m.focus == focusList && (m.viewOffset+i) == m.cursor
-			sb.WriteString(m.renderRow(snag, selected) + "\n")
+			sb.WriteString(m.renderRow(snag, m.viewOffset+i+1, selected) + "\n")
 		}
 		if end < len(visible) {
 			sb.WriteString("  ...\n")
@@ -433,7 +433,7 @@ func (m Model) View() string {
 	return sb.String()
 }
 
-func (m Model) renderRow(s Snag, selected bool) string {
+func (m Model) renderRow(s Snag, pos int, selected bool) string {
 	var indicator string
 	switch s.Status {
 	case StatusInflight:
@@ -449,7 +449,7 @@ func (m Model) renderRow(s Snag, selected bool) string {
 		sel = "▶"
 	}
 
-	line := fmt.Sprintf("%s %s %s", sel, indicator, s.Description)
+	line := fmt.Sprintf("%s %2d %s %s", sel, pos, indicator, s.Description)
 
 	switch {
 	case s.Status == StatusInflight && selected:
