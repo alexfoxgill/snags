@@ -31,6 +31,7 @@ type snagDoneMsg struct {
 
 type snagProgressMsg struct {
 	snagID   string
+	kind     string // "tool", "text", or "" for pipeline status updates
 	activity string
 }
 
@@ -134,8 +135,8 @@ func extractToolDetail(toolName, inputJSON string) string {
 }
 
 // runClaudeHeadless runs claude headless in dir with the given prompt.
-// onActivity is called with a short description each time a tool is invoked (may be nil).
-func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(string)) (success bool, notes string, err error) {
+// onActivity is called with a kind ("tool" or "text") and description for each agent event (may be nil).
+func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(kind, activity string)) (success bool, notes string, err error) {
 	start := time.Now()
 	if debugLog != nil {
 		debugLog.Printf("agent start dir=%s", dir)
@@ -199,10 +200,11 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(
 				break
 			}
 			for _, block := range line.Message.Content {
-				var activity string
+				var kind, activity string
 				switch block.Type {
 				case "tool_use":
 					detail := extractToolDetail(block.Name, string(block.Input))
+					kind = "tool"
 					activity = block.Name
 					if detail != "" {
 						activity = block.Name + "(" + detail + ")"
@@ -213,6 +215,7 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(
 						if len(t) > 60 {
 							t = t[:57] + "..."
 						}
+						kind = "text"
 						activity = t
 					}
 				}
@@ -220,7 +223,7 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(
 					select {
 					case <-ctx.Done():
 					default:
-						onActivity(activity)
+						onActivity(kind, activity)
 					}
 				}
 			}
@@ -360,9 +363,9 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) 
 
 		ch <- snagProgressMsg{snagID: snag.ID, activity: "starting up"}
 
-		onActivity := func(activity string) {
+		onActivity := func(kind, activity string) {
 			select {
-			case ch <- snagProgressMsg{snagID: snag.ID, activity: activity}:
+			case ch <- snagProgressMsg{snagID: snag.ID, kind: kind, activity: activity}:
 			default:
 			}
 		}

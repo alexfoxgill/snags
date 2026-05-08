@@ -45,10 +45,11 @@ type Model struct {
 	projectRoot     string
 	defaultBranch   string
 	width           int
-	cancelWork      context.CancelFunc
-	streamCh        chan tea.Msg
-	currentActivity string
-	inflightStart   time.Time
+	cancelWork    context.CancelFunc
+	streamCh      chan tea.Msg
+	currentTool   string
+	currentText   string
+	inflightStart time.Time
 }
 
 func waitForSnagEvent(ch chan tea.Msg) tea.Cmd {
@@ -120,14 +121,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, saveCmd(m.projectRoot, m.state), cmd)
 
 	case snagProgressMsg:
-		m.currentActivity = msg.activity
+		switch msg.kind {
+		case "tool":
+			m.currentTool = msg.activity
+		case "text":
+			m.currentText = msg.activity
+		default:
+			// pipeline status updates ("starting up", "merging", etc.)
+			m.currentTool = msg.activity
+			m.currentText = ""
+		}
 		if m.streamCh != nil {
 			cmds = append(cmds, waitForSnagEvent(m.streamCh))
 		}
 
 	case snagDoneMsg:
 		m.working = false
-		m.currentActivity = ""
+		m.currentTool = ""
+		m.currentText = ""
 		m.streamCh = nil
 		m.inflightStart = time.Time{}
 		for i := range m.state.Snags {
@@ -540,8 +551,15 @@ func (m Model) statusBarStr() string {
 			}
 			if s.Status == StatusInflight && m.working {
 				elapsed := time.Since(m.inflightStart).Round(time.Second).String()
-				if m.currentActivity != "" {
-					return "agent: " + m.currentActivity + "  " + elapsed
+				var parts []string
+				if m.currentText != "" {
+					parts = append(parts, m.currentText)
+				}
+				if m.currentTool != "" {
+					parts = append(parts, m.currentTool)
+				}
+				if len(parts) > 0 {
+					return strings.Join(parts, "  ·  ") + "  " + elapsed
 				}
 				return elapsed
 			}
