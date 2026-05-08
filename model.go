@@ -26,10 +26,11 @@ const (
 type startWorkMsg struct{}
 
 var (
-	titleStyle = lipgloss.NewStyle().Bold(true)
-	faintStyle = lipgloss.NewStyle().Faint(true)
-	redStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	boldStyle  = lipgloss.NewStyle().Bold(true)
+	titleStyle    = lipgloss.NewStyle().Bold(true)
+	faintStyle    = lipgloss.NewStyle().Faint(true)
+	redStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	boldStyle     = lipgloss.NewStyle().Bold(true)
+	inflightStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 )
 
 type Model struct {
@@ -451,6 +452,10 @@ func (m Model) renderRow(s Snag, selected bool) string {
 	line := fmt.Sprintf("%s %s %s", sel, indicator, s.Description)
 
 	switch {
+	case s.Status == StatusInflight && selected:
+		line = inflightStyle.Render(boldStyle.Render(line))
+	case s.Status == StatusInflight:
+		line = inflightStyle.Render(line)
 	case s.Status == StatusFailed && selected:
 		line = redStyle.Render(boldStyle.Render(line))
 	case s.Status == StatusFailed:
