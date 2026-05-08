@@ -288,6 +288,7 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) 
 		}
 		if !success {
 			if ctx.Err() != nil {
+				removeWorktree(projectRoot, snag.ID)
 				ch <- snagDoneMsg{snagID: snag.ID, success: false, notes: "cancelled"}
 				return
 			}
@@ -301,6 +302,7 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) 
 		if mergeErr := squashMerge(projectRoot, snag.ID, snag.Description, notes, defaultBranch); mergeErr != nil {
 			ch <- snagProgressMsg{snagID: snag.ID, activity: "resolving conflicts"}
 			if resolveErr := runConflictResolver(ctx, projectRoot, snag.ID, snag.Description); resolveErr != nil {
+				removeWorktree(projectRoot, snag.ID)
 				ch <- snagDoneMsg{snagID: snag.ID, success: false,
 					notes: fmt.Sprintf("merge conflict unresolved: %s", resolveErr)}
 				return
