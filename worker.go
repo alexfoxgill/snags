@@ -5,12 +5,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+)
+
+// Sentinel errors from squashMerge so the caller can distinguish a real merge
+// conflict (which warrants spawning the resolver) from a no-op merge (where
+// the snag branch had no effective changes vs the default branch).
+var (
+	errNothingToMerge = errors.New("nothing to merge")
+	errMergeConflict  = errors.New("merge conflict")
 )
 
 type snagDoneMsg struct {
@@ -229,8 +238,53 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(
 	return resultSuccess, resultNotes, nil
 }
 
+// commitWorktreeChanges stages and commits any uncommitted changes in the
+// worktree at dir. The buildPrompt() prompt does not instruct the worker to
+// commit, so changes often end up uncommitted; without this step `git merge
+// --squash` sees no commits on the snag branch and the subsequent commit
+// fails with "nothing to commit". Returns nil if the tree is already clean.
+func commitWorktreeChanges(dir, description string) error {
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("git status: %s", err)
+	}
+	if len(strings.TrimSpace(string(out))) == 0 {
+		return nil
+	}
+	cmd = exec.Command("git", "add", "-A")
+	cmd.Dir = dir
+	if cmdOut, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add: %s: %s", err, strings.TrimSpace(string(cmdOut)))
+	}
+	cmd = exec.Command("git", "commit", "-m", "snag: "+description)
+	cmd.Dir = dir
+	if cmdOut, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git commit: %s: %s", err, strings.TrimSpace(string(cmdOut)))
+	}
+	return nil
+}
+
+func hasUnmergedPaths(dir string) bool {
+	cmd := exec.Command("git", "diff", "--name-only", "--diff-filter=U")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) > 0
+}
+
+func hasStagedChanges(dir string) bool {
+	cmd := exec.Command("git", "diff", "--cached", "--quiet")
+	cmd.Dir = dir
+	// `git diff --cached --quiet` exits 0 if there are no staged changes,
+	// non-zero if there are.
+	return cmd.Run() != nil
+}
+
 func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) error {
-	// Verify we're on the default branch before merging
 	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 	cmd.Dir = projectRoot
 	out, err := cmd.Output()
@@ -244,9 +298,17 @@ func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) 
 
 	cmd = exec.Command("git", "merge", "--squash", "snag/"+snagID)
 	cmd.Dir = projectRoot
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
+	mergeOut, mergeErr := cmd.CombinedOutput()
+	if hasUnmergedPaths(projectRoot) {
+		return errMergeConflict
 	}
+	if mergeErr != nil {
+		return fmt.Errorf("merge: %s: %s", mergeErr, strings.TrimSpace(string(mergeOut)))
+	}
+	if !hasStagedChanges(projectRoot) {
+		return errNothingToMerge
+	}
+
 	args := []string{"commit", "-m", "snag: " + description}
 	if notes != "" {
 		args = append(args, "-m", notes)
@@ -311,9 +373,31 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) 
 			return
 		}
 
+		// Capture any uncommitted edits Claude left in the worktree so the
+		// squash merge below has commits to operate on.
+		if commitErr := commitWorktreeChanges(worktreePath(projectRoot, snag.ID), snag.Description); commitErr != nil {
+			removeWorktree(projectRoot, snag.ID)
+			ch <- snagDoneMsg{snagID: snag.ID, success: false, notes: commitErr.Error()}
+			return
+		}
+
 		ch <- snagProgressMsg{snagID: snag.ID, activity: "merging"}
 
-		if mergeErr := squashMerge(projectRoot, snag.ID, snag.Description, notes, defaultBranch); mergeErr != nil {
+		mergeErr := squashMerge(projectRoot, snag.ID, snag.Description, notes, defaultBranch)
+		switch {
+		case mergeErr == nil:
+			// merged + committed cleanly
+		case errors.Is(mergeErr, errNothingToMerge):
+			// Claude reported success but produced no net change vs the
+			// default branch. Mark the snag complete with a clear marker.
+			removeWorktree(projectRoot, snag.ID)
+			noteText := "no code changes"
+			if notes != "" {
+				noteText = "no code changes — " + notes
+			}
+			ch <- snagDoneMsg{snagID: snag.ID, success: true, notes: noteText}
+			return
+		case errors.Is(mergeErr, errMergeConflict):
 			ch <- snagProgressMsg{snagID: snag.ID, activity: "resolving conflicts"}
 			if resolveErr := runConflictResolver(ctx, projectRoot, snag.ID, snag.Description); resolveErr != nil {
 				removeWorktree(projectRoot, snag.ID)
@@ -321,6 +405,10 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) 
 					notes: fmt.Sprintf("merge conflict unresolved: %s", resolveErr)}
 				return
 			}
+		default:
+			removeWorktree(projectRoot, snag.ID)
+			ch <- snagDoneMsg{snagID: snag.ID, success: false, notes: mergeErr.Error()}
+			return
 		}
 
 		removeWorktree(projectRoot, snag.ID)
