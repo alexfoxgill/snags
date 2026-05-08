@@ -103,6 +103,7 @@ func (m Model) Init() tea.Cmd {
 		m.spinner.Tick,
 		func() tea.Msg { return startWorkMsg{} },
 		tea.SetWindowTitle(m.windowTitle()),
+		tea.EnableBracketedPaste,
 	)
 }
 
