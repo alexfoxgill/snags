@@ -533,15 +533,13 @@ func (m Model) renderRow(s Snag, pos int, selected bool) string {
 	}
 
 	if s.Status == StatusInflight && m.working {
-		var parts []string
-		if m.currentText != "" {
-			parts = append(parts, m.currentText)
-		}
-		if m.currentTool != "" {
-			parts = append(parts, m.currentTool)
-		}
-		if len(parts) > 0 {
-			line += "\n       " + faintStyle.Render(strings.Join(parts, "  ·  "))
+		if m.currentText != "" && m.currentTool != "" {
+			line += "\n       " + faintStyle.Render(m.currentText)
+			line += "\n       " + faintStyle.Render(m.currentTool)
+		} else if m.currentText != "" {
+			line += "\n       " + faintStyle.Render(m.currentText)
+		} else if m.currentTool != "" {
+			line += "\n       " + faintStyle.Render(m.currentTool)
 		}
 	}
 
