@@ -370,7 +370,7 @@ func (m Model) View() string {
 	}
 
 	sb.WriteString(strings.Repeat("─", m.width) + "\n")
-	sb.WriteString("> " + m.input.View() + "\n")
+	sb.WriteString(m.input.View() + "\n")
 	sb.WriteString(strings.Repeat("─", m.width) + "\n")
 	sb.WriteString(faintStyle.Render(m.statusBarStr()) + "\n")
 
