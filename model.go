@@ -364,16 +364,20 @@ func (m Model) View() string {
 
 	// Snag list
 	visible := m.visibleSnags()
-	end := m.viewOffset + maxVisible
-	if end > len(visible) {
-		end = len(visible)
-	}
-	for i, snag := range visible[m.viewOffset:end] {
-		selected := m.focus == focusList && (m.viewOffset+i) == m.cursor
-		sb.WriteString(m.renderRow(snag, selected) + "\n")
-	}
-	if end < len(visible) {
-		sb.WriteString("  ...\n")
+	if len(visible) == 0 {
+		sb.WriteString(faintStyle.Render("  no snags") + "\n")
+	} else {
+		end := m.viewOffset + maxVisible
+		if end > len(visible) {
+			end = len(visible)
+		}
+		for i, snag := range visible[m.viewOffset:end] {
+			selected := m.focus == focusList && (m.viewOffset+i) == m.cursor
+			sb.WriteString(m.renderRow(snag, selected) + "\n")
+		}
+		if end < len(visible) {
+			sb.WriteString("  ...\n")
+		}
 	}
 
 	sb.WriteString(strings.Repeat("─", m.width) + "\n")
