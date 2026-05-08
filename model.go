@@ -418,6 +418,16 @@ func (m *Model) clampView() {
 	if m.cursor >= m.viewOffset+maxVisible {
 		m.viewOffset = m.cursor - maxVisible + 1
 	}
+	// scroll up to fill empty space at the bottom (e.g. after a deletion)
+	if m.viewOffset > 0 {
+		visible := m.visibleSnags()
+		if minOffset := len(visible) - maxVisible; minOffset < m.viewOffset {
+			if minOffset < 0 {
+				minOffset = 0
+			}
+			m.viewOffset = minOffset
+		}
+	}
 }
 
 func (m Model) View() string {
