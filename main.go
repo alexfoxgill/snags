@@ -12,6 +12,7 @@ import (
 
 func main() {
 	startPaused := flag.Bool("paused", false, "start without automatically processing pending snags")
+	debug := flag.Bool("debug", false, "log debug events to .snags/debug.log")
 	flag.Parse()
 
 	projectRoot, err := os.Getwd()
@@ -33,6 +34,12 @@ func main() {
 	if err := EnsureSnagDir(projectRoot); err != nil {
 		fmt.Fprintf(os.Stderr, "error: could not initialise .snags/: %v\n", err)
 		os.Exit(1)
+	}
+
+	if *debug {
+		if err := initDebugLog(projectRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not open debug log: %v\n", err)
+		}
 	}
 
 	state, err := LoadState(projectRoot)

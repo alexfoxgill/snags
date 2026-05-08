@@ -135,8 +135,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if msg.success {
 					m.state.Snags[i].Status = StatusComplete
 					m.state.Snags[i].Branch = "snag/" + msg.snagID
+					if debugLog != nil {
+						debugLog.Printf("state change snag=%s inflight → complete", msg.snagID)
+					}
 				} else {
 					m.state.Snags[i].Status = StatusFailed
+					if debugLog != nil {
+						debugLog.Printf("state change snag=%s inflight → failed notes=%q", msg.snagID, msg.notes)
+					}
 				}
 				m.state.Snags[i].Notes = msg.notes
 				break
@@ -232,6 +238,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				visible := m.visibleSnags()
 				if m.cursor < len(visible) && visible[m.cursor].Status != StatusInflight {
 					id := visible[m.cursor].ID
+					if debugLog != nil {
+						debugLog.Printf("state change snag=%s deleted status=%s", id, visible[m.cursor].Status)
+					}
 					var snags []Snag
 					for _, s := range m.state.Snags {
 						if s.ID != id {
@@ -263,6 +272,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if m.state.Snags[i].ID == id {
 							m.state.Snags[i].Status = StatusPending
 							m.state.Snags[i].Notes = ""
+							if debugLog != nil {
+								debugLog.Printf("state change snag=%s failed → pending (retry)", id)
+							}
 							break
 						}
 					}
@@ -313,6 +325,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					CreatedAt:   time.Now(),
 				}
 				m.state.Snags = append(m.state.Snags, snag)
+				if debugLog != nil {
+					debugLog.Printf("state change snag=%s created → pending desc=%q", snag.ID, snag.Description)
+				}
 				m.input.SetValue("")
 				cmds = append(cmds, saveCmd(m.projectRoot, m.state))
 				if !m.working && !m.paused {
@@ -354,6 +369,9 @@ func (m Model) startNextSnag() (Model, tea.Cmd) {
 	for i := range m.state.Snags {
 		if m.state.Snags[i].Status == StatusPending {
 			m.state.Snags[i].Status = StatusInflight
+			if debugLog != nil {
+				debugLog.Printf("state change snag=%s pending → inflight desc=%q", m.state.Snags[i].ID, m.state.Snags[i].Description)
+			}
 			m.working = true
 			m.inflightStart = time.Now()
 			ctx, cancel := context.WithCancel(context.Background())

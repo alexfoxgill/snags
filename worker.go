@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -135,6 +136,16 @@ func extractToolDetail(toolName, inputJSON string) string {
 // runClaudeHeadless runs claude headless in dir with the given prompt.
 // onActivity is called with a short description each time a tool is invoked (may be nil).
 func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(string)) (success bool, notes string, err error) {
+	start := time.Now()
+	if debugLog != nil {
+		debugLog.Printf("agent start dir=%s", dir)
+	}
+	defer func() {
+		if debugLog != nil {
+			debugLog.Printf("agent done dir=%s duration=%s success=%v notes=%q", dir, time.Since(start).Round(time.Millisecond), success, notes)
+		}
+	}()
+
 	const schema = `{"type":"object","properties":{"status":{"type":"string","enum":["success","failed"]},"notes":{"type":"string"}},"required":["status"]}`
 	cmd := exec.CommandContext(ctx, "claude",
 		"--model", "claude-sonnet-4-6",
