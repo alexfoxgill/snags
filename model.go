@@ -398,9 +398,10 @@ func (m Model) View() string {
 
 	// Title bar
 	status := m.workerStatusStr()
-	title := titleStyle.Render("snags")
+	count := fmt.Sprintf(" (%d)", len(m.visibleSnags()))
+	title := titleStyle.Render("snags") + faintStyle.Render(count)
 	short := shortenPath(m.projectRoot)
-	pad := m.width - len("snags") - 1 - len(short) - len(status) - 2
+	pad := m.width - len("snags") - len(count) - 1 - len(short) - len(status) - 2
 	if pad < 1 {
 		pad = 1
 	}
