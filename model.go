@@ -47,6 +47,7 @@ type Model struct {
 	cancelWork      context.CancelFunc
 	streamCh        chan tea.Msg
 	currentActivity string
+	inflightStart   time.Time
 }
 
 func waitForSnagEvent(ch chan tea.Msg) tea.Cmd {
@@ -118,6 +119,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.working = false
 		m.currentActivity = ""
 		m.streamCh = nil
+		m.inflightStart = time.Time{}
 		for i := range m.state.Snags {
 			if m.state.Snags[i].ID == msg.snagID {
 				if msg.success {
@@ -295,6 +297,7 @@ func (m Model) startNextSnag() (Model, tea.Cmd) {
 		if m.state.Snags[i].Status == StatusPending {
 			m.state.Snags[i].Status = StatusInflight
 			m.working = true
+			m.inflightStart = time.Now()
 			ctx, cancel := context.WithCancel(context.Background())
 			m.cancelWork = cancel
 			ch := RunSnag(ctx, m.projectRoot, m.defaultBranch, m.state.Snags[i])
@@ -435,7 +438,8 @@ func (m Model) statusBarStr() string {
 		}
 	}
 	if m.working && m.currentActivity != "" {
-		return "claude: " + m.currentActivity
+		elapsed := time.Since(m.inflightStart).Round(time.Second).String()
+		return "claude: " + m.currentActivity + "  " + elapsed
 	}
 	return "↑↓ navigate  backspace delete  ctrl+p pause/resume  esc clear/quit"
 }
