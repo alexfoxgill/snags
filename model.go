@@ -87,10 +87,18 @@ func (m Model) visibleSnags() []Snag {
 	return out
 }
 
+func (m Model) windowTitle() string {
+	count := fmt.Sprintf(" (%d)", len(m.visibleSnags()))
+	short := shortenPath(m.projectRoot)
+	status := m.workerStatusStr()
+	return "snags" + count + " " + short + " " + status
+}
+
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
 		func() tea.Msg { return startWorkMsg{} },
+		tea.SetWindowTitle(m.windowTitle()),
 	)
 }
 
@@ -335,6 +343,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	cmds = append(cmds, tea.SetWindowTitle(m.windowTitle()))
 	return m, tea.Batch(cmds...)
 }
 
