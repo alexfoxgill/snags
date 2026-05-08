@@ -34,6 +34,31 @@ func TestParseStreamLineResultFailed(t *testing.T) {
 	}
 }
 
+func TestParseStreamLineToolUse(t *testing.T) {
+	raw := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"hello.txt","content":"hello world"}}]}}`
+	var line streamLine
+	if err := json.Unmarshal([]byte(raw), &line); err != nil {
+		t.Fatal(err)
+	}
+	if line.Type != "assistant" {
+		t.Errorf("expected type=assistant, got %q", line.Type)
+	}
+	if len(line.Message.Content) != 1 {
+		t.Fatalf("expected 1 content block, got %d", len(line.Message.Content))
+	}
+	block := line.Message.Content[0]
+	if block.Type != "tool_use" {
+		t.Errorf("expected tool_use, got %q", block.Type)
+	}
+	if block.Name != "Write" {
+		t.Errorf("expected Write, got %q", block.Name)
+	}
+	detail := extractToolDetail(block.Name, string(block.Input))
+	if detail != "hello.txt" {
+		t.Errorf("expected 'hello.txt', got %q", detail)
+	}
+}
+
 func TestExtractToolDetailBash(t *testing.T) {
 	detail := extractToolDetail("Bash", `{"command":"go test ./..."}`)
 	if detail != "go test ./..." {

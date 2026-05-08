@@ -24,22 +24,18 @@ type snagProgressMsg struct {
 	activity string
 }
 
-// streamLine is a parsed line from --output-format stream-json
+// streamLine is a parsed line from --output-format stream-json.
+// Tool calls arrive as assistant messages with content items of type "tool_use".
 type streamLine struct {
 	Type    string `json:"type"`
 	Subtype string `json:"subtype"`
-	Event   struct {
-		Type  string `json:"type"`
-		Index int    `json:"index"`
-		ContentBlock struct {
-			Type string `json:"type"`
-			Name string `json:"name"`
-		} `json:"content_block"`
-		Delta struct {
-			Type        string `json:"type"`
-			PartialJSON string `json:"partial_json"`
-		} `json:"delta"`
-	} `json:"event"`
+	Message struct {
+		Content []struct {
+			Type  string          `json:"type"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		} `json:"content"`
+	} `json:"message"`
 	StructuredOutput struct {
 		Status string `json:"status"`
 		Notes  string `json:"notes"`
@@ -155,12 +151,9 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(
 	}
 
 	var (
-		currentTool     string
-		currentInputBuf strings.Builder
-		currentIndex    = -1
-		resultSuccess   bool
-		resultNotes     string
-		foundResult     bool
+		resultSuccess bool
+		resultNotes   string
+		foundResult   bool
 	)
 
 	scanner := bufio.NewScanner(stdout)
@@ -171,30 +164,22 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(
 			continue
 		}
 		switch line.Type {
-		case "stream_event":
-			switch line.Event.Type {
-			case "content_block_start":
-				if line.Event.ContentBlock.Type == "tool_use" {
-					currentTool = line.Event.ContentBlock.Name
-					currentInputBuf.Reset()
-					currentIndex = line.Event.Index
-				}
-			case "content_block_delta":
-				if line.Event.Index == currentIndex && line.Event.Delta.Type == "input_json_delta" {
-					currentInputBuf.WriteString(line.Event.Delta.PartialJSON)
-				}
-			case "content_block_stop":
-				if line.Event.Index == currentIndex && currentTool != "" {
-					if onActivity != nil {
-						detail := extractToolDetail(currentTool, currentInputBuf.String())
-						activity := currentTool
-						if detail != "" {
-							activity = currentTool + "(" + detail + ")"
-						}
+		case "assistant":
+			if onActivity == nil {
+				break
+			}
+			for _, block := range line.Message.Content {
+				if block.Type == "tool_use" {
+					detail := extractToolDetail(block.Name, string(block.Input))
+					activity := block.Name
+					if detail != "" {
+						activity = block.Name + "(" + detail + ")"
+					}
+					select {
+					case <-ctx.Done():
+					default:
 						onActivity(activity)
 					}
-					currentTool = ""
-					currentIndex = -1
 				}
 			}
 		case "result":
