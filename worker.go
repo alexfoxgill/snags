@@ -132,6 +132,14 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(
 		"--verbose",
 		"--json-schema", schema,
 		"--permission-mode", "auto",
+		// Skip user-level settings/hooks/plugins so the worker doesn't inherit the user's
+		// global Claude config (skills, SessionStart hooks, MCP servers, etc.).
+		"--setting-sources", "project,local",
+		"--strict-mcp-config",
+		"--mcp-config", `{"mcpServers":{}}`,
+		"--disable-slash-commands",
+		"--tools", "Read,Edit,Write,Bash,Grep,Glob,Agent",
+		"--exclude-dynamic-system-prompt-sections",
 		"--settings", `{"autoMode":{"environment":["$defaults"]}}`,
 	)
 	cmd.Dir = dir
