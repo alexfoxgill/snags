@@ -543,6 +543,10 @@ func (m Model) renderRow(s Snag, pos int, selected bool) string {
 		}
 	}
 
+	if selected && s.Notes != "" && (s.Status == StatusComplete || s.Status == StatusFailed) {
+		line += "\n       " + faintStyle.Render(s.Notes)
+	}
+
 	return line
 }
 
@@ -575,6 +579,9 @@ func (m Model) statusBarStr() string {
 				return "↑↓ navigate"
 			}
 			if s.Status == StatusComplete {
+				if s.Notes != "" {
+					return "✓ " + s.Notes + "  backspace delete  ↑↓ navigate"
+				}
 				return "backspace delete  ↑↓ navigate"
 			}
 		}
