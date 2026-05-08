@@ -444,6 +444,9 @@ func (m Model) View() string {
 		if end > len(visible) {
 			end = len(visible)
 		}
+		if m.viewOffset > 0 {
+			sb.WriteString("  ...\n")
+		}
 		for i, snag := range visible[m.viewOffset:end] {
 			selected := m.focus == focusList && (m.viewOffset+i) == m.cursor
 			sb.WriteString(m.renderRow(snag, m.viewOffset+i+1, selected) + "\n")
