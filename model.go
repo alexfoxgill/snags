@@ -56,7 +56,7 @@ func waitForSnagEvent(ch chan tea.Msg) tea.Cmd {
 	}
 }
 
-func New(projectRoot, defaultBranch string, state State) Model {
+func New(projectRoot, defaultBranch string, state State, startPaused bool) Model {
 	ti := textinput.New()
 	ti.Placeholder = "describe a snag..."
 	ti.Focus()
@@ -69,6 +69,7 @@ func New(projectRoot, defaultBranch string, state State) Model {
 		focus:         focusInput,
 		input:         ti,
 		spinner:       sp,
+		paused:        startPaused,
 		projectRoot:   projectRoot,
 		defaultBranch: defaultBranch,
 		width:         80,

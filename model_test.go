@@ -7,7 +7,7 @@ import (
 )
 
 func newTestModel(snags []Snag) Model {
-	return New("/tmp/testproj", "main", State{Snags: snags})
+	return New("/tmp/testproj", "main", State{Snags: snags}, false)
 }
 
 func update(m Model, msg tea.Msg) Model {

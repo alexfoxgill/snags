@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,9 @@ import (
 )
 
 func main() {
+	startPaused := flag.Bool("paused", false, "start without automatically processing pending snags")
+	flag.Parse()
+
 	projectRoot, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: could not get working directory: %v\n", err)
@@ -38,7 +42,7 @@ func main() {
 	}
 
 	defaultBranch := detectDefaultBranch(projectRoot)
-	m := New(projectRoot, defaultBranch, state)
+	m := New(projectRoot, defaultBranch, state, *startPaused)
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
