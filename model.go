@@ -29,27 +29,29 @@ var (
 	titleStyle    = lipgloss.NewStyle().Bold(true)
 	faintStyle    = lipgloss.NewStyle().Faint(true)
 	redStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	greenStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	boldStyle     = lipgloss.NewStyle().Bold(true)
 	inflightStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 )
 
 type Model struct {
-	state           State
-	cursor          int
-	viewOffset      int
-	focus           focusArea
-	input           textinput.Model
-	spinner         spinner.Model
-	paused          bool
-	working         bool
-	projectRoot     string
-	defaultBranch   string
-	width           int
-	cancelWork    context.CancelFunc
-	streamCh      chan tea.Msg
-	currentTool   string
-	currentText   string
-	inflightStart time.Time
+	state                State
+	cursor               int
+	viewOffset           int
+	focus                focusArea
+	input                textinput.Model
+	spinner              spinner.Model
+	paused               bool
+	working              bool
+	projectRoot          string
+	defaultBranch        string
+	width                int
+	cancelWork           context.CancelFunc
+	streamCh             chan tea.Msg
+	currentTool          string
+	currentText          string
+	inflightStart        time.Time
+	sessionCompletedIDs  map[string]bool
 }
 
 func waitForSnagEvent(ch chan tea.Msg) tea.Cmd {
@@ -67,21 +69,22 @@ func New(projectRoot, defaultBranch string, state State, startPaused bool) Model
 	sp.Spinner = spinner.MiniDot
 
 	return Model{
-		state:         state,
-		focus:         focusInput,
-		input:         ti,
-		spinner:       sp,
-		paused:        startPaused,
-		projectRoot:   projectRoot,
-		defaultBranch: defaultBranch,
-		width:         80,
+		state:               state,
+		focus:               focusInput,
+		input:               ti,
+		spinner:             sp,
+		paused:              startPaused,
+		projectRoot:         projectRoot,
+		defaultBranch:       defaultBranch,
+		width:               80,
+		sessionCompletedIDs: make(map[string]bool),
 	}
 }
 
 func (m Model) visibleSnags() []Snag {
 	var out []Snag
 	for _, s := range m.state.Snags {
-		if s.Status != StatusComplete {
+		if s.Status != StatusComplete || m.sessionCompletedIDs[s.ID] {
 			out = append(out, s)
 		}
 	}
@@ -146,6 +149,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if msg.success {
 					m.state.Snags[i].Status = StatusComplete
 					m.state.Snags[i].Branch = "snag/" + msg.snagID
+					m.sessionCompletedIDs[msg.snagID] = true
 					if debugLog != nil {
 						debugLog.Printf("state change snag=%s inflight → complete", msg.snagID)
 					}
@@ -492,6 +496,8 @@ func (m Model) renderRow(s Snag, pos int, selected bool) string {
 		indicator = m.spinner.View()
 	case StatusFailed:
 		indicator = "✗"
+	case StatusComplete:
+		indicator = "✓"
 	default:
 		indicator = " "
 	}
@@ -512,6 +518,10 @@ func (m Model) renderRow(s Snag, pos int, selected bool) string {
 		line = redStyle.Render(boldStyle.Render(line))
 	case s.Status == StatusFailed:
 		line = redStyle.Render(line)
+	case s.Status == StatusComplete && selected:
+		line = greenStyle.Render(boldStyle.Render(line))
+	case s.Status == StatusComplete:
+		line = greenStyle.Render(faintStyle.Render(line))
 	case selected:
 		line = boldStyle.Render(line)
 	}
@@ -564,6 +574,9 @@ func (m Model) statusBarStr() string {
 			}
 			if s.Status == StatusInflight {
 				return "↑↓ navigate"
+			}
+			if s.Status == StatusComplete {
+				return "backspace delete  ↑↓ navigate"
 			}
 		}
 	}
