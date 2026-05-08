@@ -492,9 +492,12 @@ func (m Model) statusBarStr() string {
 			if s.Status == StatusPending {
 				return "e edit  backspace delete  ↑↓ navigate  alt+↑↓ reorder"
 			}
-			if s.Status == StatusInflight && m.working && m.currentActivity != "" {
+			if s.Status == StatusInflight && m.working {
 				elapsed := time.Since(m.inflightStart).Round(time.Second).String()
-				return "claude: " + m.currentActivity + "  " + elapsed
+				if m.currentActivity != "" {
+					return m.currentActivity + "  " + elapsed
+				}
+				return elapsed
 			}
 		}
 	}

@@ -263,6 +263,8 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) 
 			return
 		}
 
+		ch <- snagProgressMsg{snagID: snag.ID, activity: "starting up"}
+
 		onActivity := func(activity string) {
 			select {
 			case ch <- snagProgressMsg{snagID: snag.ID, activity: activity}:
@@ -286,7 +288,10 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) 
 			return
 		}
 
+		ch <- snagProgressMsg{snagID: snag.ID, activity: "merging"}
+
 		if mergeErr := squashMerge(projectRoot, snag.ID, snag.Description, notes, defaultBranch); mergeErr != nil {
+			ch <- snagProgressMsg{snagID: snag.ID, activity: "resolving conflicts"}
 			if resolveErr := runConflictResolver(ctx, projectRoot, snag.ID, snag.Description); resolveErr != nil {
 				ch <- snagDoneMsg{snagID: snag.ID, success: false,
 					notes: fmt.Sprintf("merge conflict unresolved: %s", resolveErr)}
