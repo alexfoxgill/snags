@@ -443,11 +443,11 @@ func (m Model) statusBarStr() string {
 			if s.Status == StatusPending {
 				return "e edit  backspace delete  ↑↓ navigate"
 			}
+			if s.Status == StatusInflight && m.working && m.currentActivity != "" {
+				elapsed := time.Since(m.inflightStart).Round(time.Second).String()
+				return "claude: " + m.currentActivity + "  " + elapsed
+			}
 		}
-	}
-	if m.working && m.currentActivity != "" {
-		elapsed := time.Since(m.inflightStart).Round(time.Second).String()
-		return "claude: " + m.currentActivity + "  " + elapsed
 	}
 	return "↑↓ navigate  backspace delete  ctrl+p pause/resume  esc clear/quit"
 }
