@@ -61,7 +61,7 @@ func New(projectRoot, defaultBranch string, state State) Model {
 	ti.Focus()
 
 	sp := spinner.New()
-	sp.Spinner = spinner.Dot
+	sp.Spinner = spinner.MiniDot
 
 	return Model{
 		state:         state,
