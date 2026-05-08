@@ -174,6 +174,50 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
+		case key.Matches(msg, keys.MoveUp):
+			if m.focus == focusList && m.cursor > 0 {
+				visible := m.visibleSnags()
+				if m.cursor < len(visible) && visible[m.cursor].Status != StatusInflight {
+					cur := visible[m.cursor]
+					prev := visible[m.cursor-1]
+					var curIdx, prevIdx int
+					for i, s := range m.state.Snags {
+						if s.ID == cur.ID {
+							curIdx = i
+						}
+						if s.ID == prev.ID {
+							prevIdx = i
+						}
+					}
+					m.state.Snags[curIdx], m.state.Snags[prevIdx] = m.state.Snags[prevIdx], m.state.Snags[curIdx]
+					m.cursor--
+					m.clampView()
+					cmds = append(cmds, saveCmd(m.projectRoot, m.state))
+				}
+			}
+
+		case key.Matches(msg, keys.MoveDown):
+			if m.focus == focusList {
+				visible := m.visibleSnags()
+				if m.cursor < len(visible)-1 && visible[m.cursor].Status != StatusInflight {
+					cur := visible[m.cursor]
+					next := visible[m.cursor+1]
+					var curIdx, nextIdx int
+					for i, s := range m.state.Snags {
+						if s.ID == cur.ID {
+							curIdx = i
+						}
+						if s.ID == next.ID {
+							nextIdx = i
+						}
+					}
+					m.state.Snags[curIdx], m.state.Snags[nextIdx] = m.state.Snags[nextIdx], m.state.Snags[curIdx]
+					m.cursor++
+					m.clampView()
+					cmds = append(cmds, saveCmd(m.projectRoot, m.state))
+				}
+			}
+
 		case key.Matches(msg, keys.Delete):
 			if m.focus == focusList {
 				visible := m.visibleSnags()
@@ -441,7 +485,7 @@ func (m Model) statusBarStr() string {
 				return "r retry"
 			}
 			if s.Status == StatusPending {
-				return "e edit  backspace delete  ↑↓ navigate"
+				return "e edit  backspace delete  ↑↓ navigate  alt+↑↓ reorder"
 			}
 			if s.Status == StatusInflight && m.working && m.currentActivity != "" {
 				elapsed := time.Since(m.inflightStart).Round(time.Second).String()
