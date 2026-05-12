@@ -454,19 +454,24 @@ func saveCmd(projectRoot string, state State) tea.Cmd {
 }
 
 func (m Model) computeInputHeight() int {
-	v := []rune(m.input.Value())
 	w := m.width
 	if w <= 0 {
 		w = 80
 	}
-	// Divide by (w-4) to account for the "> " prefix (2 chars) and word-wrap boundary margin (2 chars)
+	// Subtract 4: 2 for "> " prefix, 2 for word-wrap boundary margin
 	divisor := w - 4
 	if divisor < 1 {
 		divisor = 1
 	}
-	rows := len(v)/divisor + 1
-	if rows > 5 {
-		rows = 5
+	rows := 0
+	for _, line := range strings.Split(m.input.Value(), "\n") {
+		rows += len([]rune(line))/divisor + 1
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	if rows > 15 {
+		rows = 15
 	}
 	return rows
 }
