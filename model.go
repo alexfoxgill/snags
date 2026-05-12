@@ -529,6 +529,13 @@ func (m Model) View() string {
 	sb.WriteString(strings.Repeat("─", m.width) + "\n")
 	sb.WriteString(m.input.View() + "\n")
 	sb.WriteString(strings.Repeat("─", m.width) + "\n")
+
+	if notes := m.selectedNotes(); notes != "" {
+		wrapped := lipgloss.NewStyle().Width(m.width).Render(notes)
+		sb.WriteString(faintStyle.Render(wrapped) + "\n")
+		sb.WriteString(strings.Repeat("─", m.width) + "\n")
+	}
+
 	sb.WriteString(faintStyle.Render(m.statusBarStr()) + "\n")
 
 	return sb.String()
@@ -587,11 +594,22 @@ func (m Model) renderRow(s Snag, pos int, selected bool) string {
 		}
 	}
 
-	if selected && s.Notes != "" && (s.Status == StatusComplete || s.Status == StatusFailed) {
-		line += "\n       " + faintStyle.Render(s.Notes)
-	}
-
 	return line
+}
+
+func (m Model) selectedNotes() string {
+	if m.focus != focusList {
+		return ""
+	}
+	visible := m.visibleSnags()
+	if m.cursor >= len(visible) {
+		return ""
+	}
+	s := visible[m.cursor]
+	if (s.Status == StatusComplete || s.Status == StatusFailed) && s.Notes != "" {
+		return s.Notes
+	}
+	return ""
 }
 
 func (m Model) workerStatusStr() string {
@@ -611,9 +629,6 @@ func (m Model) statusBarStr() string {
 		if m.cursor < len(visible) {
 			s := visible[m.cursor]
 			if s.Status == StatusFailed {
-				if s.Notes != "" {
-					return "✗ " + s.Notes + "  r retry"
-				}
 				return "r retry"
 			}
 			if s.Status == StatusPending {
@@ -623,9 +638,6 @@ func (m Model) statusBarStr() string {
 				return "↑↓ navigate"
 			}
 			if s.Status == StatusComplete {
-				if s.Notes != "" {
-					return "✓ " + s.Notes + "  backspace delete  ↑↓ navigate"
-				}
 				return "backspace delete  ↑↓ navigate"
 			}
 		}
