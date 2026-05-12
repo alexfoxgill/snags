@@ -67,7 +67,7 @@ func New(projectRoot, defaultBranch string, state State, startPaused bool) Model
 	ti.ShowLineNumbers = false
 	ti.Prompt = ""
 	ti.EndOfBufferCharacter = ' '
-	ti.SetWidth(80)
+	ti.SetWidth(78)
 	ti.SetHeight(1)
 	ti.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ti.BlurredStyle.CursorLine = lipgloss.NewStyle()
@@ -125,7 +125,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
-		m.input.SetWidth(msg.Width)
+		m.input.SetWidth(msg.Width - 2)
 		m.input.SetHeight(m.computeInputHeight())
 
 	case spinner.TickMsg:
@@ -459,8 +459,8 @@ func (m Model) computeInputHeight() int {
 	if w <= 0 {
 		w = 80
 	}
-	// Divide by w-2 to leave margin for word-wrap boundaries pushing a line over
-	divisor := w - 2
+	// Divide by (w-4) to account for the "> " prefix (2 chars) and word-wrap boundary margin (2 chars)
+	divisor := w - 4
 	if divisor < 1 {
 		divisor = 1
 	}
@@ -527,7 +527,7 @@ func (m Model) View() string {
 	}
 
 	sb.WriteString(strings.Repeat("─", m.width) + "\n")
-	sb.WriteString(m.input.View() + "\n")
+	sb.WriteString("> " + m.input.View() + "\n")
 	sb.WriteString(strings.Repeat("─", m.width) + "\n")
 
 	if notes := m.selectedNotes(); notes != "" {
