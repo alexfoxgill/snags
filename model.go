@@ -9,7 +9,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -39,7 +39,7 @@ type Model struct {
 	cursor               int
 	viewOffset           int
 	focus                focusArea
-	input                textinput.Model
+	input                textarea.Model
 	spinner              spinner.Model
 	paused               bool
 	working              bool
@@ -62,9 +62,18 @@ func waitForSnagEvent(ch chan tea.Msg) tea.Cmd {
 }
 
 func New(projectRoot, defaultBranch string, state State, startPaused bool) Model {
-	ti := textinput.New()
+	ti := textarea.New()
 	ti.Placeholder = "describe a snag..."
-	ti.Focus()
+	ti.ShowLineNumbers = false
+	ti.Prompt = ""
+	ti.EndOfBufferCharacter = ' '
+	ti.SetWidth(80)
+	ti.SetHeight(1)
+	ti.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	ti.BlurredStyle.CursorLine = lipgloss.NewStyle()
+	ti.FocusedStyle.Base = lipgloss.NewStyle()
+	ti.BlurredStyle.Base = lipgloss.NewStyle()
+	ti.Focus() //nolint
 
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
@@ -116,6 +125,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.input.SetWidth(msg.Width)
+		m.input.SetHeight(m.computeInputHeight())
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -204,7 +215,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.clampView()
 				} else {
 					m.focus = focusInput
-					m.input.Focus()
+					cmds = append(cmds, m.input.Focus())
 				}
 			}
 
@@ -270,7 +281,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					visible2 := m.visibleSnags()
 					if len(visible2) == 0 {
 						m.focus = focusInput
-						m.input.Focus()
+						cmds = append(cmds, m.input.Focus())
 						m.cursor = 0
 					} else if m.cursor >= len(visible2) {
 						m.cursor = len(visible2) - 1
@@ -319,8 +330,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.state.Snags = snags
 					m.input.SetValue(snag.Description)
+					m.input.SetHeight(m.computeInputHeight())
 					m.focus = focusInput
-					m.input.Focus()
+					cmds = append(cmds, m.input.Focus())
 					visible2 := m.visibleSnags()
 					if m.cursor >= len(visible2) && m.cursor > 0 {
 						m.cursor = len(visible2) - 1
@@ -348,6 +360,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					debugLog.Printf("state change snag=%s created → pending desc=%q", snag.ID, snag.Description)
 				}
 				m.input.SetValue("")
+				m.input.SetHeight(1)
 				cmds = append(cmds, saveCmd(m.projectRoot, m.state))
 				if !m.working && !m.paused {
 					cmds = append(cmds, func() tea.Msg { return startWorkMsg{} })
@@ -357,10 +370,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Escape):
 			if m.focus == focusList {
 				m.focus = focusInput
-				m.input.Focus()
+				cmds = append(cmds, m.input.Focus())
 			} else if m.focus == focusInput {
 				if m.input.Value() != "" {
 					m.input.SetValue("")
+					m.input.SetHeight(1)
 				} else {
 					return m.quit()
 				}
@@ -373,6 +387,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.focus == focusInput && forwardToInput {
 			var inputCmd tea.Cmd
 			m.input, inputCmd = m.input.Update(msg)
+			m.input.SetHeight(m.computeInputHeight())
 			cmds = append(cmds, inputCmd)
 		}
 	}
@@ -436,6 +451,24 @@ func saveCmd(projectRoot string, state State) tea.Cmd {
 		}
 		return nil
 	}
+}
+
+func (m Model) computeInputHeight() int {
+	v := []rune(m.input.Value())
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	// Divide by w-2 to leave margin for word-wrap boundaries pushing a line over
+	divisor := w - 2
+	if divisor < 1 {
+		divisor = 1
+	}
+	rows := len(v)/divisor + 1
+	if rows > 5 {
+		rows = 5
+	}
+	return rows
 }
 
 func (m *Model) clampView() {
