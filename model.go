@@ -590,10 +590,10 @@ func (m Model) renderRow(s Snag, pos int, selected bool) string {
 
 	if s.Status == StatusInflight && m.working {
 		if m.currentText != "" && m.currentTool != "" {
-			line += "\n       " + faintStyle.Render(m.currentText)
+			line += "\n       " + faintStyle.Render(truncateInline(m.currentText, 60))
 			line += "\n       " + faintStyle.Render(m.currentTool)
 		} else if m.currentText != "" {
-			line += "\n       " + faintStyle.Render(m.currentText)
+			line += "\n       " + faintStyle.Render(truncateInline(m.currentText, 60))
 		} else if m.currentTool != "" {
 			line += "\n       " + faintStyle.Render(m.currentTool)
 		}
@@ -611,6 +611,9 @@ func (m Model) selectedNotes() string {
 		return ""
 	}
 	s := visible[m.cursor]
+	if s.Status == StatusInflight && m.currentText != "" {
+		return m.currentText
+	}
 	if (s.Status == StatusComplete || s.Status == StatusFailed) && s.Notes != "" {
 		return s.Notes
 	}
@@ -648,6 +651,14 @@ func (m Model) statusBarStr() string {
 		}
 	}
 	return "↑↓ navigate  backspace delete  ctrl+p pause/resume  esc clear/quit"
+}
+
+func truncateInline(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) > max {
+		return s[:max-3] + "..."
+	}
+	return s
 }
 
 func shortenPath(p string) string {

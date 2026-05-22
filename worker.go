@@ -211,12 +211,8 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(
 					}
 				case "text":
 					if block.Text != "" {
-						t := strings.ReplaceAll(block.Text, "\n", " ")
-						if len(t) > 60 {
-							t = t[:57] + "..."
-						}
 						kind = "text"
-						activity = t
+						activity = block.Text
 					}
 				}
 				if activity != "" {
