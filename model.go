@@ -348,16 +348,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, keys.ToggleHistory):
-			if m.focus == focusList {
-				m.showHistory = !m.showHistory
-				visible := m.visibleSnags()
-				if m.cursor >= len(visible) && len(visible) > 0 {
-					m.cursor = len(visible) - 1
-				}
-				m.clampView()
-			} else {
-				forwardToInput = true
+			m.showHistory = !m.showHistory
+			visible := m.visibleSnags()
+			if m.cursor >= len(visible) && len(visible) > 0 {
+				m.cursor = len(visible) - 1
 			}
+			m.clampView()
 
 		case key.Matches(msg, keys.Retry):
 			if m.focus == focusList {
