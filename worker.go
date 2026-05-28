@@ -24,9 +24,16 @@ var (
 )
 
 type snagDoneMsg struct {
+	snagID     string
+	success    bool
+	notes      string
+	commitHash string
+}
+
+type revertDoneMsg struct {
 	snagID  string
 	success bool
-	notes   string
+	errMsg  string
 }
 
 type snagProgressMsg struct {
@@ -421,8 +428,44 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) 
 			return
 		}
 
+		commitHash := ""
+		revCmd := exec.Command("git", "rev-parse", "HEAD")
+		revCmd.Dir = projectRoot
+		if hashOut, err := revCmd.Output(); err == nil {
+			commitHash = strings.TrimSpace(string(hashOut))
+		}
+
 		removeWorktree(projectRoot, snag.ID)
-		ch <- snagDoneMsg{snagID: snag.ID, success: true, notes: notes}
+		ch <- snagDoneMsg{snagID: snag.ID, success: true, notes: notes, commitHash: commitHash}
 	}()
 	return ch
+}
+
+func revertSnag(projectRoot, snagID, description, commitHash string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("git", "revert", "--no-edit", commitHash)
+		cmd.Dir = projectRoot
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			if hasUnmergedPaths(projectRoot) {
+				prompt := fmt.Sprintf(
+					"A `git revert` conflict occurred while reverting commit %s (snag: %q). "+
+						"Resolve the conflicts in the working tree, then run: git commit --no-edit",
+					commitHash, description,
+				)
+				resolveSuccess, _, resolveErr := runClaudeHeadless(context.Background(), projectRoot, prompt, nil)
+				if resolveErr != nil || !resolveSuccess {
+					exec.Command("git", "-C", projectRoot, "revert", "--abort").Run() //nolint
+					msg := "revert conflict unresolved"
+					if resolveErr != nil {
+						msg = resolveErr.Error()
+					}
+					return revertDoneMsg{snagID: snagID, success: false, errMsg: msg}
+				}
+				return revertDoneMsg{snagID: snagID, success: true}
+			}
+			return revertDoneMsg{snagID: snagID, success: false, errMsg: strings.TrimSpace(string(out))}
+		}
+		return revertDoneMsg{snagID: snagID, success: true}
+	}
 }

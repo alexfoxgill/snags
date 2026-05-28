@@ -53,6 +53,8 @@ type Model struct {
 	inflightStart        time.Time
 	sessionCompletedIDs  map[string]bool
 	lastTitle            string
+	showHistory          bool
+	confirmingRevert     bool
 }
 
 func waitForSnagEvent(ch chan tea.Msg) tea.Cmd {
@@ -96,7 +98,10 @@ func New(projectRoot, defaultBranch string, state State, startPaused bool) Model
 func (m Model) visibleSnags() []Snag {
 	var out []Snag
 	for _, s := range m.state.Snags {
-		if s.Status != StatusComplete || m.sessionCompletedIDs[s.ID] {
+		if s.Status == StatusReverted {
+			continue
+		}
+		if s.Status != StatusComplete || m.sessionCompletedIDs[s.ID] || m.showHistory {
 			out = append(out, s)
 		}
 	}
@@ -164,9 +169,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if msg.success {
 					m.state.Snags[i].Status = StatusComplete
 					m.state.Snags[i].Branch = "snag/" + msg.snagID
+					m.state.Snags[i].CommitHash = msg.commitHash
 					m.sessionCompletedIDs[msg.snagID] = true
 					if debugLog != nil {
-						debugLog.Printf("state change snag=%s inflight → complete", msg.snagID)
+						debugLog.Printf("state change snag=%s inflight → complete hash=%s", msg.snagID, msg.commitHash)
 					}
 				} else {
 					m.state.Snags[i].Status = StatusFailed
@@ -182,7 +188,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m, workCmd = m.startNextSnag()
 		cmds = append(cmds, saveCmd(m.projectRoot, m.state), workCmd)
 
+	case revertDoneMsg:
+		for i := range m.state.Snags {
+			if m.state.Snags[i].ID == msg.snagID {
+				if msg.success {
+					m.state.Snags[i].Status = StatusReverted
+					if debugLog != nil {
+						debugLog.Printf("state change snag=%s complete → reverted", msg.snagID)
+					}
+				} else {
+					m.state.Snags[i].Notes = msg.errMsg
+					if debugLog != nil {
+						debugLog.Printf("revert failed snag=%s err=%q", msg.snagID, msg.errMsg)
+					}
+				}
+				break
+			}
+		}
+		visible := m.visibleSnags()
+		if m.cursor >= len(visible) && len(visible) > 0 {
+			m.cursor = len(visible) - 1
+		}
+		m.clampView()
+		cmds = append(cmds, saveCmd(m.projectRoot, m.state))
+
 	case tea.KeyMsg:
+		if m.confirmingRevert {
+			switch {
+			case key.Matches(msg, keys.Enter):
+				m.confirmingRevert = false
+				visible := m.visibleSnags()
+				if m.cursor < len(visible) {
+					snag := visible[m.cursor]
+					if snag.CommitHash != "" {
+						cmds = append(cmds, revertSnag(m.projectRoot, snag.ID, snag.Description, snag.CommitHash))
+					}
+				}
+			case key.Matches(msg, keys.Escape):
+				m.confirmingRevert = false
+			}
+			return m, tea.Batch(cmds...)
+		}
+
 		forwardToInput := false
 
 		switch {
@@ -266,29 +313,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Delete):
 			if m.focus == focusList {
 				visible := m.visibleSnags()
-				if m.cursor < len(visible) && visible[m.cursor].Status != StatusInflight {
-					id := visible[m.cursor].ID
-					if debugLog != nil {
-						debugLog.Printf("state change snag=%s deleted status=%s", id, visible[m.cursor].Status)
-					}
-					var snags []Snag
-					for _, s := range m.state.Snags {
-						if s.ID != id {
-							snags = append(snags, s)
+				if m.cursor < len(visible) {
+					snag := visible[m.cursor]
+					if snag.Status == StatusComplete {
+						if snag.CommitHash != "" {
+							m.confirmingRevert = true
 						}
+					} else if snag.Status != StatusInflight {
+						id := snag.ID
+						if debugLog != nil {
+							debugLog.Printf("state change snag=%s deleted status=%s", id, snag.Status)
+						}
+						var snags []Snag
+						for _, s := range m.state.Snags {
+							if s.ID != id {
+								snags = append(snags, s)
+							}
+						}
+						m.state.Snags = snags
+						visible2 := m.visibleSnags()
+						if len(visible2) == 0 {
+							m.focus = focusInput
+							cmds = append(cmds, m.input.Focus())
+							m.cursor = 0
+						} else if m.cursor >= len(visible2) {
+							m.cursor = len(visible2) - 1
+						}
+						m.clampView()
+						cmds = append(cmds, saveCmd(m.projectRoot, m.state))
 					}
-					m.state.Snags = snags
-					visible2 := m.visibleSnags()
-					if len(visible2) == 0 {
-						m.focus = focusInput
-						cmds = append(cmds, m.input.Focus())
-						m.cursor = 0
-					} else if m.cursor >= len(visible2) {
-						m.cursor = len(visible2) - 1
-					}
-					m.clampView()
-					cmds = append(cmds, saveCmd(m.projectRoot, m.state))
 				}
+			} else {
+				forwardToInput = true
+			}
+
+		case key.Matches(msg, keys.ToggleHistory):
+			if m.focus == focusList {
+				m.showHistory = !m.showHistory
+				visible := m.visibleSnags()
+				if m.cursor >= len(visible) && len(visible) > 0 {
+					m.cursor = len(visible) - 1
+				}
+				m.clampView()
 			} else {
 				forwardToInput = true
 			}
@@ -555,6 +621,8 @@ func (m Model) renderRow(s Snag, pos int, selected bool) string {
 		indicator = "✗"
 	case StatusComplete:
 		indicator = "✓"
+	case StatusReverted:
+		indicator = "↩"
 	default:
 		indicator = " "
 	}
@@ -579,6 +647,10 @@ func (m Model) renderRow(s Snag, pos int, selected bool) string {
 		line = greenStyle.Render(boldStyle.Render(line))
 	case s.Status == StatusComplete:
 		line = greenStyle.Render(faintStyle.Render(line))
+	case s.Status == StatusReverted && selected:
+		line = faintStyle.Render(boldStyle.Render(line))
+	case s.Status == StatusReverted:
+		line = faintStyle.Render(line)
 	case selected:
 		line = boldStyle.Render(line)
 	}
@@ -632,6 +704,13 @@ func (m Model) workerStatusStr() string {
 }
 
 func (m Model) statusBarStr() string {
+	if m.confirmingRevert {
+		visible := m.visibleSnags()
+		if m.cursor < len(visible) {
+			desc := truncateInline(visible[m.cursor].Description, 40)
+			return fmt.Sprintf("Revert %q?  enter confirm  esc cancel", desc)
+		}
+	}
 	if m.focus == focusList {
 		visible := m.visibleSnags()
 		if m.cursor < len(visible) {
@@ -646,9 +725,13 @@ func (m Model) statusBarStr() string {
 				return "↑↓ navigate"
 			}
 			if s.Status == StatusComplete {
-				return "backspace delete  ↑↓ navigate"
+				if s.CommitHash != "" {
+					return "backspace revert  tab toggle history  ↑↓ navigate"
+				}
+				return "tab toggle history  ↑↓ navigate"
 			}
 		}
+		return "tab toggle history  ↑↓ navigate"
 	}
 	return "↑↓ navigate  backspace delete  ctrl+p pause/resume  esc clear/quit"
 }

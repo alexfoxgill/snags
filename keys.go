@@ -3,17 +3,18 @@ package main
 import "github.com/charmbracelet/bubbles/key"
 
 type keyMap struct {
-	Up          key.Binding
-	Down        key.Binding
-	MoveUp      key.Binding
-	MoveDown    key.Binding
-	Delete      key.Binding
-	Enter       key.Binding
-	Escape      key.Binding
-	PauseResume key.Binding
-	Quit        key.Binding
-	Retry       key.Binding
-	Edit        key.Binding
+	Up             key.Binding
+	Down           key.Binding
+	MoveUp         key.Binding
+	MoveDown       key.Binding
+	Delete         key.Binding
+	Enter          key.Binding
+	Escape         key.Binding
+	PauseResume    key.Binding
+	Quit           key.Binding
+	Retry          key.Binding
+	Edit           key.Binding
+	ToggleHistory  key.Binding
 }
 
 var keys = keyMap{
@@ -60,5 +61,9 @@ var keys = keyMap{
 	Edit: key.NewBinding(
 		key.WithKeys("e"),
 		key.WithHelp("e", "edit snag"),
+	),
+	ToggleHistory: key.NewBinding(
+		key.WithKeys("tab"),
+		key.WithHelp("tab", "show/hide history"),
 	),
 }

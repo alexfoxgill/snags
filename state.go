@@ -19,6 +19,7 @@ const (
 	StatusInflight SnagStatus = "inflight"
 	StatusComplete SnagStatus = "complete"
 	StatusFailed   SnagStatus = "failed"
+	StatusReverted SnagStatus = "reverted"
 )
 
 type Snag struct {
@@ -28,6 +29,7 @@ type Snag struct {
 	CreatedAt   time.Time  `yaml:"created_at"`
 	Branch      string     `yaml:"branch,omitempty"`
 	Notes       string     `yaml:"notes,omitempty"`
+	CommitHash  string     `yaml:"commit_hash,omitempty"`
 }
 
 type State struct {
