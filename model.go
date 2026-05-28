@@ -421,6 +421,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if debugLog != nil {
 					debugLog.Printf("state change snag=%s created → pending desc=%q", snag.ID, snag.Description)
 				}
+				if visible := m.visibleSnags(); len(visible) > maxVisible {
+					m.viewOffset = len(visible) - maxVisible
+				}
 				m.input.SetValue("")
 				m.input.SetHeight(1)
 				cmds = append(cmds, saveCmd(m.projectRoot, m.state))
