@@ -427,6 +427,54 @@ func TestMergeStageCommitFailureLeavesIndexClean(t *testing.T) {
 	}
 }
 
+func TestMergeStageStagedChangesBlockMerge(t *testing.T) {
+	dir := initMergeTestRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "other.txt"), []byte("user original\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "add", "-A")
+	gitRun(t, dir, "commit", "-m", "add other")
+
+	snag := Snag{ID: "stg001", Description: "change file"}
+	startSnagBranch(t, dir, snag.ID, "snag version\n")
+
+	// The user has a staged edit to an unrelated file when the snag finishes.
+	if err := os.WriteFile(filepath.Join(dir, "other.txt"), []byte("user edit\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "add", "other.txt")
+
+	msg := mergeStage(dir, "master", snag, "", DefaultConfig())
+	if msg.success || !msg.mergeFailed {
+		t.Fatalf("expected merge failure, got success=%v mergeFailed=%v notes=%q", msg.success, msg.mergeFailed, msg.notes)
+	}
+	if !strings.Contains(msg.notes, "staged changes") {
+		t.Errorf("unexpected notes: %q", msg.notes)
+	}
+	if !branchExists(dir, "snag/stg001") {
+		t.Error("branch snag/stg001 was deleted")
+	}
+	// The staged edit must survive untouched: still staged, content intact.
+	cmd := exec.Command("git", "diff", "--cached", "--name-only")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(out)) != "other.txt" {
+		t.Errorf("staged files changed: %q", out)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "other.txt"))
+	if err != nil || string(data) != "user edit\n" {
+		t.Errorf("staged edit content lost: %q err=%v", data, err)
+	}
+	// And the squash must not have run: file.txt untouched on master.
+	data, err = os.ReadFile(filepath.Join(dir, "file.txt"))
+	if err != nil || string(data) != "original\n" {
+		t.Errorf("squash ran despite staged changes: %q err=%v", data, err)
+	}
+}
+
 // The marker-scan design centerpiece: a marker file dirty only by the marker
 // line in the working tree, while the agent branch modifies that same file.
 // DeleteMarker brings the file back to HEAD, so the squash merge proceeds.
@@ -516,6 +564,34 @@ func TestAgenticMergeCmdVerifiedCommitSucceeds(t *testing.T) {
 	}
 	if branchExists(dir, "snag/agm002") {
 		t.Error("branch snag/agm002 not deleted after verified merge")
+	}
+}
+
+func TestAgenticMergeCmdForeignCommitIsFailure(t *testing.T) {
+	dir := initMergeTestRepo(t)
+	snag := Snag{ID: "agm004", Description: "change file"}
+	startSnagBranch(t, dir, snag.ID, "snag version\n")
+	removeWorktreeOnly(dir, snag.ID)
+
+	// HEAD advances during the run — but by a user-style commit, not a snag
+	// commit. The agent's success claim must not be trusted.
+	writeStubClaude(t,
+		"echo 'user work' > user.txt\n"+
+			"git add user.txt >/dev/null 2>&1\n"+
+			"git commit -m 'unrelated user commit' >/dev/null 2>&1\n"+
+			stubSuccessResult)
+	msg := agenticMergeCmd(dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
+	if msg.success {
+		t.Fatal("expected failure when HEAD advanced without a snag commit")
+	}
+	if !strings.Contains(msg.errMsg, "no snag commit landed") {
+		t.Errorf("unexpected errMsg: %q", msg.errMsg)
+	}
+	if msg.commitHash != "" {
+		t.Errorf("expected empty commitHash, got %q", msg.commitHash)
+	}
+	if !branchExists(dir, "snag/agm004") {
+		t.Error("branch snag/agm004 deleted despite no snag commit landing")
 	}
 }
 

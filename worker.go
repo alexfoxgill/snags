@@ -250,6 +250,9 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, cfg AgentConfig,
 	// and a child that inherited stdout would keep the scanner below blocked.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// If a grandchild escaped the process group (setsid) and holds stdout open
+	// after the group kill, force-close the pipes so Wait can't block forever.
+	cmd.WaitDelay = 10 * time.Second
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
@@ -396,6 +399,13 @@ func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) 
 		return fmt.Errorf("not on %s (currently on %s) — switch to %s before running snags", defaultBranch, currentBranch, defaultBranch)
 	}
 
+	// Refuse to merge over the user's staged work: the squash commit would
+	// silently sweep it in, and backing a failed commit out with `git reset
+	// --merge` would destroy it.
+	if hasStagedChanges(projectRoot) {
+		return errors.New("staged changes in working tree — commit or unstage them, then retry the merge")
+	}
+
 	cmd = exec.Command("git", "merge", "--squash", "snag/"+snagID)
 	cmd.Dir = projectRoot
 	mergeOut, mergeErr := cmd.CombinedOutput()
@@ -418,12 +428,34 @@ func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) 
 	if out, err := cmd.CombinedOutput(); err != nil {
 		// Back out the staged squash: left in the index it makes every later
 		// merge refuse until the user cleans up by hand.
+		commitErr := fmt.Errorf("commit: %s: %s", err, strings.TrimSpace(string(out)))
 		resetCmd := exec.Command("git", "reset", "--merge")
 		resetCmd.Dir = projectRoot
-		resetCmd.Run()
-		return fmt.Errorf("commit: %s: %s", err, strings.TrimSpace(string(out)))
+		if resetOut, resetErr := resetCmd.CombinedOutput(); resetErr != nil {
+			return fmt.Errorf("%w; git reset --merge failed (%s: %s) — staged squash left in index",
+				commitErr, resetErr, strings.TrimSpace(string(resetOut)))
+		}
+		return commitErr
 	}
 	return nil
+}
+
+// snagCommitLanded reports whether any commit in preHead..HEAD has a subject
+// starting with "snag:". It distinguishes a merge agent's squash commit from
+// unrelated commits the user may have made while the agent ran.
+func snagCommitLanded(projectRoot, preHead string) bool {
+	cmd := exec.Command("git", "log", preHead+"..HEAD", "--format=%s")
+	cmd.Dir = projectRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	for _, subject := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(subject, "snag:") {
+			return true
+		}
+	}
+	return false
 }
 
 func headCommitHash(projectRoot string) string {
@@ -564,10 +596,13 @@ func agenticMergeCmd(projectRoot, defaultBranch string, cfg Config, snag Snag) t
 		success, notes, err := runClaudeHeadless(context.Background(), projectRoot, prompt, cfg.Agents.Merge, tl, nil)
 
 		// Trust git, not the agent's report: the merge is only done if a new
-		// commit actually landed. Branch snag/<id> is the sole copy of the
-		// work, so it is deleted only on a verified merge.
+		// commit actually landed AND one of the new commits is a snag commit
+		// (a user committing to the default branch mid-run also advances HEAD).
+		// Branch snag/<id> is the sole copy of the work, so it is deleted only
+		// on a verified merge.
 		newHead := headCommitHash(projectRoot)
-		if err == nil && success && newHead != "" && newHead != preHead {
+		headAdvanced := newHead != "" && newHead != preHead
+		if err == nil && success && headAdvanced && snagCommitLanded(projectRoot, preHead) {
 			deleteSnagBranch(projectRoot, snag.ID)
 			return mergeDoneMsg{snagID: snag.ID, success: true, commitHash: newHead}
 		}
@@ -578,6 +613,8 @@ func agenticMergeCmd(projectRoot, defaultBranch string, cfg Config, snag Snag) t
 			errMsg = err.Error()
 		case !success:
 			errMsg = notes
+		case headAdvanced:
+			errMsg = fmt.Sprintf("merge agent reported success but no snag commit landed (HEAD moved by other commits) — branch snag/%s preserved", snag.ID)
 		default:
 			errMsg = fmt.Sprintf("merge agent reported success but no commit was created — branch snag/%s preserved", snag.ID)
 		}
@@ -632,6 +669,9 @@ func runSummary(ctx context.Context, projectRoot string, cfg AgentConfig, marker
 	// claude's subprocesses too.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// Same pipe-hang hardening as runClaudeHeadless: a setsid-escaped
+	// grandchild holding stdout must not block Wait after the group kill.
+	cmd.WaitDelay = 10 * time.Second
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
