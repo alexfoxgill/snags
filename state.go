@@ -29,6 +29,7 @@ type Snag struct {
 	CreatedAt   time.Time  `yaml:"created_at"`
 	StartedAt   time.Time  `yaml:"started_at,omitempty"`
 	CompletedAt time.Time  `yaml:"completed_at,omitempty"`
+	Duration    string     `yaml:"duration,omitempty"`
 	Branch      string     `yaml:"branch,omitempty"`
 	Notes       string     `yaml:"notes,omitempty"`
 	CommitHash  string     `yaml:"commit_hash,omitempty"`
