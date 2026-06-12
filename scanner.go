@@ -41,11 +41,10 @@ type fileMarker struct {
 	spanEnd   int // byte offset just past the comment span on the marker line
 }
 
-// parseMarkers finds all markers in lines. Line-comment markers consume
-// immediately-following full-line comments with the same leader as
-// continuations; block-comment markers are single-line.
-func parseMarkers(lines []string, keyword string) []fileMarker {
-	re := markerRegexp(keyword)
+// parseMarkers finds all markers in lines using a regexp from markerRegexp.
+// Line-comment markers consume immediately-following full-line comments with
+// the same leader as continuations; block-comment markers are single-line.
+func parseMarkers(lines []string, re *regexp.Regexp) []fileMarker {
 	var markers []fileMarker
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
@@ -58,21 +57,29 @@ func parseMarkers(lines []string, keyword string) []fileMarker {
 		text := line[m[1]:]
 		spanEnd := len(line)
 		if closer != "" {
-			if idx := strings.Index(text, closer); idx >= 0 {
-				spanEnd = m[1] + idx + len(closer)
-				text = text[:idx]
+			idx := strings.Index(text, closer)
+			if idx < 0 {
+				// Unclosed block comment: the comment spans further lines,
+				// so deleting just this line would leave a dangling closer.
+				// Not a marker.
+				continue
 			}
-		}
-		text = strings.TrimSpace(text)
-		if closer == "" {
+			spanEnd = m[1] + idx + len(closer)
+			text = text[:idx]
+		} else {
+			// A line-comment leader inside a block comment, e.g.
+			// `<!-- note -- snag: fix -->`: strip the block closer from the
+			// text and end the span before it so deletion preserves it.
 			for _, c := range []string{"*/", "-->"} {
-				if strings.HasSuffix(text, c) {
-					text = strings.TrimSpace(strings.TrimSuffix(text, c))
+				if t := strings.TrimRight(text, " \t"); strings.HasSuffix(t, c) {
+					text = t[:len(t)-len(c)]
+					spanEnd = m[1] + len(text)
 				}
 			}
 		}
+		text = strings.TrimSpace(text)
 
-		end := i
+		start, end := i, i
 		if closer == "" {
 			for j := i + 1; j < len(lines); j++ {
 				trimmed := strings.TrimLeft(lines[j], " \t")
@@ -87,15 +94,19 @@ func parseMarkers(lines []string, keyword string) []fileMarker {
 				end = j
 			}
 		}
+		i = end
 
+		text = strings.TrimSpace(text)
+		if text == "" {
+			continue
+		}
 		markers = append(markers, fileMarker{
-			startLine: i,
+			startLine: start,
 			endLine:   end,
 			text:      text,
 			leaderPos: m[2],
 			spanEnd:   spanEnd,
 		})
-		i = end
 	}
 	return markers
 }
@@ -110,10 +121,14 @@ func splitLines(content string) []string {
 
 // ScanMarkers finds all `<keyword>:` comment markers in the working tree.
 // git grep is only a prefilter for candidate files; line numbers and text
-// come from parsing the files.
+// come from parsing the files. Discovery is purely textual, so a marker
+// inside a string literal is indistinguishable from one in a comment.
 func ScanMarkers(projectRoot, keyword string) ([]Marker, error) {
 	pattern := `(//|#|--|/\*|<!--)[[:space:]]*` + regexp.QuoteMeta(keyword) + `:`
-	cmd := exec.Command("git", "-C", projectRoot, "grep", "-nIE", "--untracked", "-e", pattern, "--", ".")
+	// -l -z prints NUL-separated file names without quoting, so paths with
+	// non-ASCII characters (which core.quotePath mangles in line-oriented
+	// output) or `:` parse correctly.
+	cmd := exec.Command("git", "-C", projectRoot, "grep", "-lzIE", "--untracked", "-e", pattern, "--", ".")
 	out, err := cmd.Output()
 	if err != nil {
 		ee, ok := err.(*exec.ExitError)
@@ -127,20 +142,15 @@ func ScanMarkers(projectRoot, keyword string) ([]Marker, error) {
 		return nil, fmt.Errorf("git grep: %w%s", err, detail)
 	}
 
-	seen := map[string]bool{}
 	var files []string
-	for _, ln := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
-		idx := strings.Index(ln, ":")
-		if idx <= 0 {
-			continue
-		}
-		if f := ln[:idx]; !seen[f] {
-			seen[f] = true
+	for _, f := range strings.Split(string(out), "\x00") {
+		if f != "" {
 			files = append(files, f)
 		}
 	}
 	sort.Strings(files)
 
+	re := markerRegexp(keyword)
 	var result []Marker
 	for _, f := range files {
 		data, err := os.ReadFile(filepath.Join(projectRoot, f))
@@ -148,7 +158,7 @@ func ScanMarkers(projectRoot, keyword string) ([]Marker, error) {
 			return nil, err
 		}
 		lines := splitLines(string(data))
-		for _, fm := range parseMarkers(lines, keyword) {
+		for _, fm := range parseMarkers(lines, re) {
 			start := max(0, fm.startLine-contextRadius)
 			end := min(len(lines)-1, fm.endLine+contextRadius)
 			result = append(result, Marker{
@@ -184,8 +194,9 @@ func DeleteMarker(projectRoot, file, markerText, keyword string) error {
 	content := string(data)
 	lines := splitLines(content)
 
+	re := markerRegexp(keyword)
 	var target *fileMarker
-	for _, fm := range parseMarkers(lines, keyword) {
+	for _, fm := range parseMarkers(lines, re) {
 		if fm.text == markerText {
 			target = &fm
 			break
@@ -196,7 +207,7 @@ func DeleteMarker(projectRoot, file, markerText, keyword string) error {
 	}
 
 	if head, err := exec.Command("git", "-C", projectRoot, "show", "HEAD:"+filepath.ToSlash(file)).Output(); err == nil {
-		for _, fm := range parseMarkers(splitLines(string(head)), keyword) {
+		for _, fm := range parseMarkers(splitLines(string(head)), re) {
 			if fm.text == markerText {
 				return nil
 			}

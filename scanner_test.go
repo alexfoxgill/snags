@@ -275,6 +275,55 @@ func TestScanMarkersContextWindow(t *testing.T) {
 	}
 }
 
+func TestScanMarkersNonASCIIFilename(t *testing.T) {
+	dir := initScannerRepo(t)
+	writeRepoFile(t, dir, "héllo.go", "package a\n// snag: fix accents\n")
+
+	markers := mustScan(t, dir, "snag")
+	if len(markers) != 1 {
+		t.Fatalf("expected 1 marker, got %d: %+v", len(markers), markers)
+	}
+	if markers[0].File != "héllo.go" || markers[0].Text != "fix accents" {
+		t.Errorf("got %s %q", markers[0].File, markers[0].Text)
+	}
+}
+
+func TestScanMarkersUnclosedBlock(t *testing.T) {
+	dir := initScannerRepo(t)
+	content := "/* snag: refactor\nthis thing */\nint x;\n"
+	writeRepoFile(t, dir, "f.c", content)
+	writeRepoFile(t, dir, "f.html", "<!-- snag: open\nrest -->\n")
+
+	markers := mustScan(t, dir, "snag")
+	if len(markers) != 0 {
+		t.Fatalf("unclosed block markers should be skipped, got %+v", markers)
+	}
+
+	if err := DeleteMarker(dir, "f.c", "refactor", "snag"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRepoFile(t, dir, "f.c"); got != content {
+		t.Errorf("file changed: %q", got)
+	}
+}
+
+func TestScanMarkersEmptyText(t *testing.T) {
+	dir := initScannerRepo(t)
+	content := "x()\n// snag:\ny()\n"
+	writeRepoFile(t, dir, "f.go", content)
+
+	markers := mustScan(t, dir, "snag")
+	if len(markers) != 0 {
+		t.Fatalf("empty marker should be skipped, got %+v", markers)
+	}
+	if err := DeleteMarker(dir, "f.go", "", "snag"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRepoFile(t, dir, "f.go"); got != content {
+		t.Errorf("file changed: %q", got)
+	}
+}
+
 func TestDeleteMarkerFullLineContinuation(t *testing.T) {
 	dir := initScannerRepo(t)
 	writeRepoFile(t, dir, "f.go",
@@ -312,6 +361,22 @@ func TestDeleteMarkerBlockWithRemainder(t *testing.T) {
 	got := readRepoFile(t, dir, "f.c")
 	if got != "foo();  bar();\n" {
 		t.Errorf("wrong content after delete: %q", got)
+	}
+}
+
+func TestDeleteMarkerInsideBlockComment(t *testing.T) {
+	dir := initScannerRepo(t)
+	writeRepoFile(t, dir, "f.html", "<!-- note -- snag: fix this -->\n<p>hi</p>\n")
+
+	markers := mustScan(t, dir, "snag")
+	if len(markers) != 1 || markers[0].Text != "fix this" {
+		t.Fatalf("expected one marker %q, got %+v", "fix this", markers)
+	}
+	if err := DeleteMarker(dir, "f.html", "fix this", "snag"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRepoFile(t, dir, "f.html"); got != "<!-- note -->\n<p>hi</p>\n" {
+		t.Errorf("comment closer lost: %q", got)
 	}
 }
 
