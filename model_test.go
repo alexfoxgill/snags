@@ -588,6 +588,9 @@ func TestMergeKeyIgnoredWhileWorking(t *testing.T) {
 	if m.mergingID != "" {
 		t.Errorf("merge should be ignored while working, got mergingID=%q", m.mergingID)
 	}
+	if m.notice != "waiting for current snag to finish" {
+		t.Errorf("expected a notice explaining the deferral, got %q", m.notice)
+	}
 }
 
 func TestMergeKeyIgnoredWhileAnotherMergeRuns(t *testing.T) {
@@ -683,6 +686,47 @@ func TestQuitCancelsMergeAgent(t *testing.T) {
 	m.quit()
 	if !cancelled {
 		t.Error("quit should cancel an in-flight merge agent")
+	}
+}
+
+// --- Revert cancellation (same shape as the merge agent) ---
+
+func TestRevertConfirmSetsCancelRevert(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusComplete, CommitHash: "deadbeef", Description: "task"}}
+	m := newTestModel(snags)
+	m.showHistory = true
+	m.focus = focusList
+	m.cursor = 0
+	m = update(m, keyMsg(tea.KeyBackspace)) // arm the revert confirmation
+	if !m.confirmingRevert {
+		t.Fatal("expected revert confirmation armed")
+	}
+	m, _ = updateWithCmd(m, keyMsg(tea.KeyEnter)) // do not run the cmd: it would invoke git revert
+	if m.cancelRevert == nil {
+		t.Error("expected a cancel func stored when a revert starts")
+	}
+}
+
+func TestQuitCancelsRevertAgent(t *testing.T) {
+	m := newTestModel(nil)
+	var cancelled bool
+	m.cancelRevert = func() { cancelled = true }
+	m.quit()
+	if !cancelled {
+		t.Error("quit should cancel an in-flight revert resolver")
+	}
+}
+
+func TestRevertDoneClearsCancelRevert(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusComplete, CommitHash: "deadbeef", Description: "task"}}
+	m := newTestModel(snags)
+	m.cancelRevert = func() {}
+	m = update(m, revertDoneMsg{snagID: "abc", success: true})
+	if m.cancelRevert != nil {
+		t.Error("expected cancelRevert cleared on revertDoneMsg")
+	}
+	if m.state.Snags[0].Status != StatusReverted {
+		t.Errorf("expected reverted, got %q", m.state.Snags[0].Status)
 	}
 }
 

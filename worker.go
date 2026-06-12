@@ -187,6 +187,18 @@ func extractToolDetail(toolName, inputJSON string) string {
 	return v
 }
 
+// isolationArgs are the hardening flags shared by every headless claude run:
+// they skip user-level settings/hooks/plugins so the worker doesn't inherit
+// the user's global Claude config (skills, SessionStart hooks, MCP servers,
+// slash commands, etc.).
+var isolationArgs = []string{
+	"--setting-sources", "project,local",
+	"--strict-mcp-config",
+	"--mcp-config", `{"mcpServers":{}}`,
+	"--disable-slash-commands",
+	"--exclude-dynamic-system-prompt-sections",
+}
+
 // claudeArgs builds the claude argv (excluding the binary name) for a headless run.
 func claudeArgs(cfg AgentConfig, prompt, schema string) []string {
 	args := []string{"--model", cfg.Model}
@@ -199,14 +211,10 @@ func claudeArgs(cfg AgentConfig, prompt, schema string) []string {
 		"--verbose",
 		"--json-schema", schema,
 		"--permission-mode", "auto",
-		// Skip user-level settings/hooks/plugins so the worker doesn't inherit the user's
-		// global Claude config (skills, SessionStart hooks, MCP servers, etc.).
-		"--setting-sources", "project,local",
-		"--strict-mcp-config",
-		"--mcp-config", `{"mcpServers":{}}`,
-		"--disable-slash-commands",
+	)
+	args = append(args, isolationArgs...)
+	args = append(args,
 		"--tools", "Read,Edit,Write,Bash,Grep,Glob,Agent",
-		"--exclude-dynamic-system-prompt-sections",
 		"--settings", `{"autoMode":{"environment":["$defaults"]}}`,
 	)
 	return append(args, cfg.ExtraArgs...)
@@ -387,7 +395,9 @@ func hasStagedChanges(dir string) bool {
 	return cmd.Run() != nil
 }
 
-func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) error {
+// requireDefaultBranch errors unless HEAD in projectRoot is on defaultBranch.
+// action names the operation for the error message ("running snags", "merging").
+func requireDefaultBranch(projectRoot, defaultBranch, action string) error {
 	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 	cmd.Dir = projectRoot
 	out, err := cmd.Output()
@@ -396,7 +406,14 @@ func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) 
 	}
 	currentBranch := strings.TrimSpace(string(out))
 	if currentBranch != defaultBranch {
-		return fmt.Errorf("not on %s (currently on %s) — switch to %s before running snags", defaultBranch, currentBranch, defaultBranch)
+		return fmt.Errorf("not on %s (currently on %s) — switch to %s before %s", defaultBranch, currentBranch, defaultBranch, action)
+	}
+	return nil
+}
+
+func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) error {
+	if err := requireDefaultBranch(projectRoot, defaultBranch, "running snags"); err != nil {
+		return err
 	}
 
 	// Refuse to merge over the user's staged work: the squash commit would
@@ -406,7 +423,7 @@ func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) 
 		return errors.New("staged changes in working tree — commit or unstage them, then retry the merge")
 	}
 
-	cmd = exec.Command("git", "merge", "--squash", "snag/"+snagID)
+	cmd := exec.Command("git", "merge", "--squash", "snag/"+snagID)
 	cmd.Dir = projectRoot
 	mergeOut, mergeErr := cmd.CombinedOutput()
 	if hasUnmergedPaths(projectRoot) {
@@ -440,22 +457,25 @@ func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) 
 	return nil
 }
 
-// snagCommitLanded reports whether any commit in preHead..HEAD has a subject
-// starting with "snag:". It distinguishes a merge agent's squash commit from
-// unrelated commits the user may have made while the agent ran.
-func snagCommitLanded(projectRoot, preHead string) bool {
-	cmd := exec.Command("git", "log", preHead+"..HEAD", "--format=%s")
+// snagCommitLanded returns the hash of the first commit in preHead..HEAD whose
+// subject starts with "snag:", or "" if none landed. It distinguishes a merge
+// agent's squash commit from unrelated commits the user may have made while
+// the agent ran — recording HEAD instead would make a later revert undo the
+// user's work.
+func snagCommitLanded(projectRoot, preHead string) string {
+	cmd := exec.Command("git", "log", preHead+"..HEAD", "--format=%H %s")
 	cmd.Dir = projectRoot
 	out, err := cmd.Output()
 	if err != nil {
-		return false
+		return ""
 	}
-	for _, subject := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(subject, "snag:") {
-			return true
+	for _, line := range strings.Split(string(out), "\n") {
+		hash, subject, ok := strings.Cut(line, " ")
+		if ok && strings.HasPrefix(subject, "snag:") {
+			return hash
 		}
 	}
-	return false
+	return ""
 }
 
 func headCommitHash(projectRoot string) string {
@@ -471,8 +491,16 @@ func headCommitHash(projectRoot string) string {
 // mergeStage runs everything after the snag branch is committed: marker
 // deletion, the squash merge, and worktree/branch cleanup. Merge-stage
 // failures remove the worktree but preserve branch snag/<id> so the user can
-// retry the merge agentically.
-func mergeStage(projectRoot, defaultBranch string, snag Snag, notes string, cfg Config) snagDoneMsg {
+// retry the merge agentically. Each merge failure is also written to the
+// snag's transcript via tl, so the log doesn't end on the agent's success
+// while the snag shows failed.
+func mergeStage(projectRoot, defaultBranch string, snag Snag, notes string, cfg Config, tl *transcriptLogger) (msg snagDoneMsg) {
+	defer func() {
+		if msg.mergeFailed {
+			tl.result(false, msg.notes)
+		}
+	}()
+
 	if snag.Source == SourceMarker {
 		if err := DeleteMarker(projectRoot, snag.File, snag.Description, cfg.Marker); err != nil {
 			removeWorktreeOnly(projectRoot, snag.ID)
@@ -567,7 +595,7 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag, 
 		}
 
 		ch <- snagProgressMsg{snagID: snag.ID, activity: "merging"}
-		ch <- mergeStage(projectRoot, defaultBranch, snag, notes, cfg)
+		ch <- mergeStage(projectRoot, defaultBranch, snag, notes, cfg, tl)
 	}()
 	return ch
 }
@@ -579,6 +607,13 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag, 
 // applies and the branch is preserved.
 func agenticMergeCmd(ctx context.Context, projectRoot, defaultBranch string, cfg Config, snag Snag) tea.Cmd {
 	return func() tea.Msg {
+		// Same guard as squashMerge: if the user switched branches since the
+		// snag failed, the agent would merge in the wrong place and the
+		// preserved branch would still be deleted.
+		if err := requireDefaultBranch(projectRoot, defaultBranch, "merging"); err != nil {
+			return mergeDoneMsg{snagID: snag.ID, success: false, errMsg: err.Error()}
+		}
+
 		tl := newTranscriptLogger(projectRoot, snag.ID)
 		defer tl.Close()
 		tl.runStart("merge")
@@ -602,12 +637,14 @@ func agenticMergeCmd(ctx context.Context, projectRoot, defaultBranch string, cfg
 		// commit actually landed AND one of the new commits is a snag commit
 		// (a user committing to the default branch mid-run also advances HEAD).
 		// Branch snag/<id> is the sole copy of the work, so it is deleted only
-		// on a verified merge.
+		// on a verified merge. Record the snag commit's hash, not HEAD: a user
+		// commit on top mid-run would otherwise be what a later revert undoes.
 		newHead := headCommitHash(projectRoot)
 		headAdvanced := newHead != "" && newHead != preHead
-		if err == nil && success && headAdvanced && snagCommitLanded(projectRoot, preHead) {
+		snagHash := snagCommitLanded(projectRoot, preHead)
+		if err == nil && success && headAdvanced && snagHash != "" {
 			deleteSnagBranch(projectRoot, snag.ID)
-			return mergeDoneMsg{snagID: snag.ID, success: true, commitHash: newHead}
+			return mergeDoneMsg{snagID: snag.ID, success: true, commitHash: snagHash}
 		}
 
 		var errMsg string
@@ -659,12 +696,8 @@ func runSummary(ctx context.Context, projectRoot string, cfg AgentConfig, marker
 		"-p", prompt,
 		"--output-format", "text",
 		"--tools", "",
-		"--setting-sources", "project,local",
-		"--strict-mcp-config",
-		"--mcp-config", `{"mcpServers":{}}`,
-		"--disable-slash-commands",
-		"--exclude-dynamic-system-prompt-sections",
 	)
+	args = append(args, isolationArgs...)
 	args = append(args, cfg.ExtraArgs...)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = projectRoot
@@ -691,7 +724,11 @@ func runSummary(ctx context.Context, projectRoot string, cfg AgentConfig, marker
 	return "", errors.New("summary: empty output")
 }
 
-func revertSnag(projectRoot, snagID, description, commitHash string, cfg Config) tea.Cmd {
+// revertSnag reverts a completed snag's commit. A conflicted revert spawns a
+// headless claude to resolve it; cancelling ctx kills that resolver (e.g. on
+// quit, so it cannot keep committing to the default branch after the app
+// exits) and the conflicted revert is aborted.
+func revertSnag(ctx context.Context, projectRoot, snagID, description, commitHash string, cfg Config) tea.Cmd {
 	return func() tea.Msg {
 		cmd := exec.Command("git", "revert", "--no-edit", commitHash)
 		cmd.Dir = projectRoot
@@ -706,12 +743,14 @@ func revertSnag(projectRoot, snagID, description, commitHash string, cfg Config)
 						"Resolve the conflicts in the working tree, then run: git commit --no-edit",
 					commitHash, description,
 				)
-				resolveSuccess, _, resolveErr := runClaudeHeadless(context.Background(), projectRoot, prompt, cfg.Agents.Merge, tl, nil)
+				resolveSuccess, resolveNotes, resolveErr := runClaudeHeadless(ctx, projectRoot, prompt, cfg.Agents.Merge, tl, nil)
 				if resolveErr != nil || !resolveSuccess {
 					exec.Command("git", "-C", projectRoot, "revert", "--abort").Run() //nolint
 					msg := "revert conflict unresolved"
 					if resolveErr != nil {
 						msg = resolveErr.Error()
+					} else if resolveNotes != "" {
+						msg = resolveNotes
 					}
 					return revertDoneMsg{snagID: snagID, success: false, errMsg: msg}
 				}

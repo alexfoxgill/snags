@@ -79,6 +79,11 @@ func LoadState(projectRoot string) (State, error) {
 		if s.Snags[i].Status == StatusInflight {
 			s.Snags[i].Status = StatusPending
 		}
+		// Old schema set Branch on success; the branch is deleted once a snag
+		// completes, so clear it rather than render a dead branch in details.
+		if s.Snags[i].Status == StatusComplete || s.Snags[i].Status == StatusReverted {
+			s.Snags[i].Branch = ""
+		}
 	}
 	return s, nil
 }

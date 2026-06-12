@@ -89,6 +89,53 @@ func TestInflightResetOnLoad(t *testing.T) {
 	}
 }
 
+func TestLoadStateClearsStaleBranchOnFinishedSnags(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".snags"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Old schema set Branch on successful snags; complete/reverted snags must
+	// load with it cleared. Failed snags keep theirs (preserved branch).
+	oldYAML := `snags:
+- id: a
+  description: done snag
+  status: complete
+  created_at: 2024-01-01T00:00:00Z
+  branch: snag/a
+- id: b
+  description: reverted snag
+  status: reverted
+  created_at: 2024-01-01T00:00:00Z
+  branch: snag/b
+- id: c
+  description: failed snag
+  status: failed
+  created_at: 2024-01-01T00:00:00Z
+  branch: snag/c
+`
+	if err := os.WriteFile(filepath.Join(dir, ".snags", "state.yaml"), []byte(oldYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Snags) != 3 {
+		t.Fatalf("expected 3 snags, got %d", len(state.Snags))
+	}
+	if got := state.Snags[0].Branch; got != "" {
+		t.Errorf("complete snag should load with branch cleared, got %q", got)
+	}
+	if got := state.Snags[1].Branch; got != "" {
+		t.Errorf("reverted snag should load with branch cleared, got %q", got)
+	}
+	if got := state.Snags[2].Branch; got != "snag/c" {
+		t.Errorf("failed snag must keep its preserved branch, got %q", got)
+	}
+}
+
 func TestEnsureSnagDirCreatesDir(t *testing.T) {
 	dir := t.TempDir()
 	if err := EnsureSnagDir(dir); err != nil {

@@ -6,11 +6,11 @@ Each snag is executed by spawning `claude` CLI in headless mode inside an isolat
 
 ## Architecture
 
-The app is a single Go package (`main`) with nine files:
+The app is a single Go package (`main`) with ten files:
 
 **`main.go`** — entry point. Validates prerequisites (git repo, `claude` in PATH), loads state, then hands off to BubbleTea.
 
-**`model.go`** — BubbleTea `Model`. Owns all TUI state: snag list, cursor/scroll position, text input, spinner, and the `cancelWork` context cancel func. On `startWorkMsg`, calls `startNextSnag()` which picks the first `pending` snag, flips it to `inflight`, creates a `RunSnag` goroutine, and listens on its channel via `waitForSnagEvent`. Progress arrives as `snagProgressMsg`; completion as `snagDoneMsg`. On done, the model saves state and immediately tries the next snag. Marker snags without a summary trigger a `summaryCmd` (haiku agent) that produces a short display title.
+**`model.go`** — BubbleTea `Model`. Owns all TUI state: snag list, cursor/scroll position, text input, spinner, and the `cancelWork` context cancel func. On `startWorkMsg`, calls `startNextSnag()` which picks the first `pending` snag, flips it to `inflight`, creates a `RunSnag` goroutine, and listens on its channel via `waitForSnagEvent`. Progress arrives as `snagProgressMsg`; completion as `snagDoneMsg`. On done, the model saves state and immediately tries the next snag. Newly scanned marker snags trigger a `summaryCmd` (haiku agent) that produces a short display title.
 
 **`worker.go`** — snag execution pipeline. `RunSnag` creates a git worktree at `.snags/worktrees/<id>` on a branch `snag/<id>`, invokes `claude` with `--output-format stream-json --permission-mode auto`, parses the NDJSON stream to extract tool-call activity (for the status bar) and the final structured-output result (`{"status":"success"|"failed","notes":"..."}`). On success, calls `mergeStage`: deletes the inline marker from the working tree (marker snags only), then squash-merges the branch. On merge conflict the worktree is removed but `snag/<id>` is preserved; the user triggers an agentic merge with `m`. `agenticMergeCmd` runs a headless Claude in the project root to perform the merge and resolve conflicts; it only deletes the branch once a snag commit is verified on HEAD.
 
@@ -25,6 +25,8 @@ The app is a single Go package (`main`) with nine files:
 **`details.go`** — details page (opened with Enter on a list item). Shows snag metadata, notes, and the scrollable transcript. Keys: `↑/↓` scroll, `pgup/pgdn` page, `Esc`/`Enter` back to list.
 
 **`keys.go`** — BubbleTea key bindings. All keybindings are centralised here.
+
+**`debug.go`** — `--debug` support: opens `.snags/debug.log` and exposes the package-level `debugLog` logger (nil when disabled).
 
 ## App Functionality
 

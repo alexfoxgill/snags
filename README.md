@@ -4,7 +4,7 @@ A TUI for queuing and autonomously processing small coding tasks. Each snag is e
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.26.2+
 - `claude` CLI ([Claude Code](https://claude.ai/code)) in your PATH
 - A git repository
 

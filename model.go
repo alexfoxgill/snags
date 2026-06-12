@@ -68,6 +68,7 @@ type Model struct {
 	height              int
 	cancelWork          context.CancelFunc
 	cancelMerge         context.CancelFunc
+	cancelRevert        context.CancelFunc
 	streamCh            chan tea.Msg
 	currentTool         string
 	currentText         string
@@ -342,6 +343,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, saveCmd(m.projectRoot, m.state), func() tea.Msg { return startWorkMsg{} })
 
 	case revertDoneMsg:
+		if m.cancelRevert != nil {
+			m.cancelRevert()
+			m.cancelRevert = nil
+		}
 		for i := range m.state.Snags {
 			if m.state.Snags[i].ID == msg.snagID {
 				if msg.success {
@@ -357,6 +362,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				break
 			}
+		}
+		if m.mode == viewDetails && msg.snagID == m.detailsID {
+			m.refreshDetails()
 		}
 		visible := m.visibleSnags()
 		if m.cursor >= len(visible) && len(visible) > 0 {
@@ -380,7 +388,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cursor < len(visible) {
 					snag := visible[m.cursor]
 					if snag.CommitHash != "" {
-						cmds = append(cmds, revertSnag(m.projectRoot, snag.ID, snag.Description, snag.CommitHash, m.cfg))
+						// Cancellable so quit() can kill the conflict resolver
+						// rather than orphaning it to commit after the app exits.
+						ctx, cancel := context.WithCancel(context.Background())
+						m.cancelRevert = cancel
+						cmds = append(cmds, revertSnag(ctx, m.projectRoot, snag.ID, snag.Description, snag.CommitHash, m.cfg))
 					}
 				}
 			case key.Matches(msg, keys.Escape):
@@ -554,16 +566,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				visible := m.visibleSnags()
 				if m.cursor < len(visible) {
 					snag := visible[m.cursor]
-					if snag.Status == StatusFailed && snag.Branch != "" && !m.working && m.mergingID == "" {
-						m.mergingID = snag.ID
-						if debugLog != nil {
-							debugLog.Printf("agentic merge started snag=%s branch=%s", snag.ID, snag.Branch)
+					if snag.Status == StatusFailed && snag.Branch != "" && m.mergingID == "" {
+						if m.working {
+							m.notice = "waiting for current snag to finish"
+						} else {
+							m.mergingID = snag.ID
+							if debugLog != nil {
+								debugLog.Printf("agentic merge started snag=%s branch=%s", snag.ID, snag.Branch)
+							}
+							// Cancellable so quit() can kill the merge agent rather
+							// than orphaning it to commit after the app exits.
+							ctx, cancel := context.WithCancel(context.Background())
+							m.cancelMerge = cancel
+							cmds = append(cmds, agenticMergeCmd(ctx, m.projectRoot, m.defaultBranch, m.cfg, snag))
 						}
-						// Cancellable so quit() can kill the merge agent rather
-						// than orphaning it to commit after the app exits.
-						ctx, cancel := context.WithCancel(context.Background())
-						m.cancelMerge = cancel
-						cmds = append(cmds, agenticMergeCmd(ctx, m.projectRoot, m.defaultBranch, m.cfg, snag))
 					}
 				}
 			} else {
@@ -703,6 +719,9 @@ func (m Model) quit() (tea.Model, tea.Cmd) {
 	}
 	if m.cancelMerge != nil {
 		m.cancelMerge()
+	}
+	if m.cancelRevert != nil {
+		m.cancelRevert()
 	}
 	for i := range m.state.Snags {
 		if m.state.Snags[i].Status == StatusInflight {

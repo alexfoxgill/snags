@@ -159,8 +159,8 @@ func TestClaudeArgsDefault(t *testing.T) {
 		"--strict-mcp-config",
 		"--mcp-config", `{"mcpServers":{}}`,
 		"--disable-slash-commands",
-		"--tools", "Read,Edit,Write,Bash,Grep,Glob,Agent",
 		"--exclude-dynamic-system-prompt-sections",
+		"--tools", "Read,Edit,Write,Bash,Grep,Glob,Agent",
 		"--settings", `{"autoMode":{"environment":["$defaults"]}}`,
 	}
 	if !reflect.DeepEqual(args, expected) {
@@ -293,12 +293,24 @@ func TestMergeStageConflictPreservesBranch(t *testing.T) {
 	gitRun(t, dir, "add", "-A")
 	gitRun(t, dir, "commit", "-m", "conflicting change")
 
-	msg := mergeStage(dir, "master", snag, "agent notes", DefaultConfig())
+	tl := newTranscriptLogger(dir, snag.ID)
+	msg := mergeStage(dir, "master", snag, "agent notes", DefaultConfig(), tl)
+	tl.Close()
 	if msg.success || !msg.mergeFailed {
 		t.Fatalf("expected merge failure, got success=%v mergeFailed=%v notes=%q", msg.success, msg.mergeFailed, msg.notes)
 	}
 	if !strings.Contains(msg.notes, "merge conflict") || !strings.Contains(msg.notes, "snag/abc123 preserved") {
 		t.Errorf("unexpected notes: %q", msg.notes)
+	}
+	// The failure must land in the transcript so the log doesn't end on the
+	// agent's success while the snag shows failed.
+	events := readTranscript(snagLogFile(dir, snag.ID))
+	if len(events) == 0 {
+		t.Fatal("expected a transcript event for the merge failure")
+	}
+	last := events[len(events)-1]
+	if last.Type != "result" || last.Status != "failed" || !strings.Contains(last.Notes, "merge conflict") {
+		t.Errorf("expected failed result event in transcript, got %+v", last)
 	}
 	if !workingTreeClean(t, dir) {
 		t.Error("working tree not clean after git reset --merge")
@@ -321,7 +333,7 @@ func TestMergeStageMarkerDeleteErrorPreservesBranch(t *testing.T) {
 	snag := Snag{ID: "def456", Description: "fix thing", Source: SourceMarker, File: "adir", Line: 1}
 	wt := startSnagBranch(t, dir, snag.ID, "snag version\n")
 
-	msg := mergeStage(dir, "master", snag, "", DefaultConfig())
+	msg := mergeStage(dir, "master", snag, "", DefaultConfig(), nil)
 	if msg.success || !msg.mergeFailed {
 		t.Fatalf("expected merge failure, got success=%v mergeFailed=%v notes=%q", msg.success, msg.mergeFailed, msg.notes)
 	}
@@ -341,7 +353,7 @@ func TestMergeStageSuccess(t *testing.T) {
 	snag := Snag{ID: "fed789", Description: "change file"}
 	wt := startSnagBranch(t, dir, snag.ID, "snag version\n")
 
-	msg := mergeStage(dir, "master", snag, "agent notes", DefaultConfig())
+	msg := mergeStage(dir, "master", snag, "agent notes", DefaultConfig(), nil)
 	if !msg.success || msg.mergeFailed {
 		t.Fatalf("expected success, got success=%v mergeFailed=%v notes=%q", msg.success, msg.mergeFailed, msg.notes)
 	}
@@ -371,7 +383,7 @@ func TestMergeStageNothingToMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msg := mergeStage(dir, "master", snag, "agent notes", DefaultConfig())
+	msg := mergeStage(dir, "master", snag, "agent notes", DefaultConfig(), nil)
 	if !msg.success || msg.mergeFailed {
 		t.Fatalf("expected success, got success=%v mergeFailed=%v notes=%q", msg.success, msg.mergeFailed, msg.notes)
 	}
@@ -401,7 +413,7 @@ func TestMergeStageCommitFailureLeavesIndexClean(t *testing.T) {
 	}
 	gitRun(t, dir, "config", "core.hooksPath", hooks)
 
-	msg := mergeStage(dir, "master", snag, "", DefaultConfig())
+	msg := mergeStage(dir, "master", snag, "", DefaultConfig(), nil)
 	if msg.success || !msg.mergeFailed {
 		t.Fatalf("expected merge failure, got success=%v mergeFailed=%v notes=%q", msg.success, msg.mergeFailed, msg.notes)
 	}
@@ -422,7 +434,7 @@ func TestMergeStageCommitFailureLeavesIndexClean(t *testing.T) {
 	gitRun(t, dir, "config", "--unset", "core.hooksPath")
 	snag2 := Snag{ID: "hook02", Description: "second change"}
 	startSnagBranch(t, dir, snag2.ID, "second version\n")
-	if msg2 := mergeStage(dir, "master", snag2, "", DefaultConfig()); !msg2.success {
+	if msg2 := mergeStage(dir, "master", snag2, "", DefaultConfig(), nil); !msg2.success {
 		t.Fatalf("follow-up merge blocked: %q", msg2.notes)
 	}
 }
@@ -444,7 +456,7 @@ func TestMergeStageStagedChangesBlockMerge(t *testing.T) {
 	}
 	gitRun(t, dir, "add", "other.txt")
 
-	msg := mergeStage(dir, "master", snag, "", DefaultConfig())
+	msg := mergeStage(dir, "master", snag, "", DefaultConfig(), nil)
 	if msg.success || !msg.mergeFailed {
 		t.Fatalf("expected merge failure, got success=%v mergeFailed=%v notes=%q", msg.success, msg.mergeFailed, msg.notes)
 	}
@@ -489,7 +501,7 @@ func TestMergeStageMarkerOnlyDirtyFileMerges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msg := mergeStage(dir, "master", snag, "notes", DefaultConfig())
+	msg := mergeStage(dir, "master", snag, "notes", DefaultConfig(), nil)
 	if !msg.success || msg.mergeFailed {
 		t.Fatalf("expected success, got success=%v mergeFailed=%v notes=%q", msg.success, msg.mergeFailed, msg.notes)
 	}
@@ -592,6 +604,75 @@ func TestAgenticMergeCmdForeignCommitIsFailure(t *testing.T) {
 	}
 	if !branchExists(dir, "snag/agm004") {
 		t.Error("branch snag/agm004 deleted despite no snag commit landing")
+	}
+}
+
+func TestAgenticMergeCmdWrongBranch(t *testing.T) {
+	dir := initMergeTestRepo(t)
+	snag := Snag{ID: "agm006", Description: "change file"}
+	startSnagBranch(t, dir, snag.ID, "snag version\n")
+	removeWorktreeOnly(dir, snag.ID)
+	preHead := headCommitHash(dir)
+	gitRun(t, dir, "checkout", "-b", "feature")
+
+	// The stub would merge and commit if it ran; the guard must stop it first.
+	writeStubClaude(t,
+		"git merge --squash snag/agm006 >/dev/null 2>&1\n"+
+			"git commit -m 'snag: change file' >/dev/null 2>&1\n"+
+			stubSuccessResult)
+	msg, ok := agenticMergeCmd(context.Background(), dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
+	if !ok {
+		t.Fatal("expected mergeDoneMsg")
+	}
+	if msg.success {
+		t.Fatal("expected failure when not on the default branch")
+	}
+	if !strings.Contains(msg.errMsg, "not on master (currently on feature)") {
+		t.Errorf("unexpected errMsg: %q", msg.errMsg)
+	}
+	if headCommitHash(dir) != preHead {
+		t.Error("HEAD must not move when the guard trips")
+	}
+	if !branchExists(dir, "snag/agm006") {
+		t.Error("branch snag/agm006 must be preserved")
+	}
+}
+
+func TestAgenticMergeCmdRecordsSnagCommitHash(t *testing.T) {
+	dir := initMergeTestRepo(t)
+	snag := Snag{ID: "agm007", Description: "change file"}
+	startSnagBranch(t, dir, snag.ID, "snag version\n")
+	removeWorktreeOnly(dir, snag.ID)
+
+	// The snag commit lands, then a user commit on top before the run ends:
+	// HEAD is the user's commit, not the snag's. A revert of the recorded hash
+	// must undo the snag, not the user's work.
+	writeStubClaude(t,
+		"git merge --squash snag/agm007 >/dev/null 2>&1\n"+
+			"git commit -m 'snag: change file' >/dev/null 2>&1\n"+
+			"echo 'user work' > user.txt\n"+
+			"git add user.txt >/dev/null 2>&1\n"+
+			"git commit -m 'user commit mid-run' >/dev/null 2>&1\n"+
+			stubSuccessResult)
+	msg := agenticMergeCmd(context.Background(), dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
+	if !msg.success {
+		t.Fatalf("expected success, got errMsg=%q", msg.errMsg)
+	}
+	cmd := exec.Command("git", "rev-parse", "HEAD^")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snagHash := strings.TrimSpace(string(out))
+	if msg.commitHash != snagHash {
+		t.Errorf("expected snag commit hash %q, got %q", snagHash, msg.commitHash)
+	}
+	if msg.commitHash == headCommitHash(dir) {
+		t.Error("recorded hash must not be the user's commit at HEAD")
+	}
+	if branchExists(dir, "snag/agm007") {
+		t.Error("branch snag/agm007 not deleted after verified merge")
 	}
 }
 
