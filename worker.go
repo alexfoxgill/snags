@@ -574,7 +574,10 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag, 
 
 // agenticMergeCmd retries a failed merge: a headless claude run in the project
 // root squash-merges the preserved branch snag/<id> and resolves any conflicts.
-func agenticMergeCmd(projectRoot, defaultBranch string, cfg Config, snag Snag) tea.Cmd {
+// Cancelling ctx kills the merge agent (e.g. on quit, so it cannot keep
+// committing to the default branch after the app exits); the failure path then
+// applies and the branch is preserved.
+func agenticMergeCmd(ctx context.Context, projectRoot, defaultBranch string, cfg Config, snag Snag) tea.Cmd {
 	return func() tea.Msg {
 		tl := newTranscriptLogger(projectRoot, snag.ID)
 		defer tl.Close()
@@ -593,7 +596,7 @@ func agenticMergeCmd(projectRoot, defaultBranch string, cfg Config, snag Snag) t
 		}
 
 		preHead := headCommitHash(projectRoot)
-		success, notes, err := runClaudeHeadless(context.Background(), projectRoot, prompt, cfg.Agents.Merge, tl, nil)
+		success, notes, err := runClaudeHeadless(ctx, projectRoot, prompt, cfg.Agents.Merge, tl, nil)
 
 		// Trust git, not the agent's report: the merge is only done if a new
 		// commit actually landed AND one of the new commits is a snag commit

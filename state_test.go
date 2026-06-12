@@ -47,6 +47,28 @@ func TestSaveLoadRoundtrip(t *testing.T) {
 	}
 }
 
+func TestSaveStateLeavesNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".snags"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	state := State{Snags: []Snag{{ID: "abc", Description: "x", Status: StatusPending}}}
+	for i := 0; i < 3; i++ {
+		if err := SaveState(dir, state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, ".snags"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "state.yaml" {
+			t.Errorf("unexpected file left in .snags/: %s", e.Name())
+		}
+	}
+}
+
 func TestInflightResetOnLoad(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".snags"), 0755); err != nil {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -624,9 +625,10 @@ func TestMergeKeyInInputForwardsToInput(t *testing.T) {
 }
 
 func TestMergeDoneSuccess(t *testing.T) {
-	snags := []Snag{{ID: "abc", Status: StatusFailed, Branch: "snag/abc", Description: "task", Notes: "merge conflict"}}
+	snags := []Snag{{ID: "abc", Status: StatusFailed, Branch: "snag/abc", Description: "task", Notes: "merge conflict — branch snag/abc preserved"}}
 	m := newTestModel(snags)
 	m.mergingID = "abc"
+	m.cancelMerge = func() {}
 	m = update(m, mergeDoneMsg{snagID: "abc", success: true, commitHash: "deadbeef"})
 
 	s := m.state.Snags[0]
@@ -639,11 +641,14 @@ func TestMergeDoneSuccess(t *testing.T) {
 	if s.Branch != "" {
 		t.Errorf("expected branch cleared, got %q", s.Branch)
 	}
-	if s.Notes != "merge conflict" {
-		t.Errorf("expected notes unchanged, got %q", s.Notes)
+	if s.Notes != "merged by agent" {
+		t.Errorf("expected stale failure notes replaced with 'merged by agent', got %q", s.Notes)
 	}
 	if m.mergingID != "" {
 		t.Error("expected mergingID cleared")
+	}
+	if m.cancelMerge != nil {
+		t.Error("expected cancelMerge cleared")
 	}
 	if !m.sessionCompletedIDs["abc"] {
 		t.Error("expected snag marked session-completed (stays visible)")
@@ -657,6 +662,27 @@ func TestMergeDoneSuccessFillsEmptyNotes(t *testing.T) {
 	m = update(m, mergeDoneMsg{snagID: "abc", success: true, commitHash: "deadbeef"})
 	if m.state.Snags[0].Notes != "merged by agent" {
 		t.Errorf("expected 'merged by agent', got %q", m.state.Snags[0].Notes)
+	}
+}
+
+func TestMergeKeySetsCancelMerge(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusFailed, Branch: "snag/abc", Description: "task"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	m, _ = updateWithCmd(m, runeMsg('m')) // do not run the cmd: it would invoke claude
+	if m.cancelMerge == nil {
+		t.Error("expected a cancel func stored when a merge starts")
+	}
+}
+
+func TestQuitCancelsMergeAgent(t *testing.T) {
+	m := newTestModel(nil)
+	var cancelled bool
+	m.cancelMerge = func() { cancelled = true }
+	m.quit()
+	if !cancelled {
+		t.Error("quit should cancel an in-flight merge agent")
 	}
 }
 
@@ -711,11 +737,11 @@ func TestStatusBarShowsMergeForFailedWithBranch(t *testing.T) {
 	m := newTestModel(snags)
 	m.focus = focusList
 	m.cursor = 0
-	if got := m.statusBarStr(); got != "m agentic merge  r retry" {
+	if got := m.statusBarStr(); got != "enter details  m agentic merge  r retry" {
 		t.Errorf("wrong status bar: %q", got)
 	}
 	m.state.Snags[0].Branch = ""
-	if got := m.statusBarStr(); got != "r retry" {
+	if got := m.statusBarStr(); got != "enter details  r retry" {
 		t.Errorf("wrong status bar without branch: %q", got)
 	}
 }
@@ -874,5 +900,73 @@ func TestQueueRunsWhileDetailsOpen(t *testing.T) {
 	}
 	if m.mode != viewDetails {
 		t.Error("details should stay open")
+	}
+}
+
+func TestDetailsCtrlPTogglesPause(t *testing.T) {
+	snags := []Snag{{ID: "a", Status: StatusPending, Description: "first"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	m = update(m, keyMsg(tea.KeyEnter))
+	m = update(m, tea.KeyMsg{Type: tea.KeyCtrlP})
+	if !m.paused {
+		t.Error("ctrl+p should pause from details mode")
+	}
+	if m.mode != viewDetails {
+		t.Error("details should stay open across ctrl+p")
+	}
+	m = update(m, tea.KeyMsg{Type: tea.KeyCtrlP})
+	if m.paused {
+		t.Error("second ctrl+p should resume")
+	}
+}
+
+func TestResizeFollowsTailInDetails(t *testing.T) {
+	snags := []Snag{{ID: "a", Status: StatusFailed, Description: "task"}}
+	m := newTestModel(snags)
+	m.width = 40
+	m.height = 30
+	m.focus = focusList
+	m.cursor = 0
+	m = update(m, keyMsg(tea.KeyEnter))
+	m.detailsEvents = makeTextEvents(50)
+	m.detailsScroll = m.detailsMaxScroll() // parked at the tail
+
+	// Shrinking raises maxScroll; a tail-parked view must follow it.
+	m = update(m, tea.WindowSizeMsg{Width: 40, Height: 12})
+	if m.detailsScroll != m.detailsMaxScroll() {
+		t.Errorf("expected to stay at tail after shrink, got %d want %d", m.detailsScroll, m.detailsMaxScroll())
+	}
+
+	// Not at the tail: resize keeps position.
+	m.detailsScroll = 1
+	m = update(m, tea.WindowSizeMsg{Width: 40, Height: 10})
+	if m.detailsScroll != 1 {
+		t.Errorf("expected scroll position kept when not at tail, got %d", m.detailsScroll)
+	}
+}
+
+func TestDetailsHeaderShowsElapsedForInflight(t *testing.T) {
+	snags := []Snag{{ID: "a", Status: StatusInflight, Description: "task"}}
+	m := newTestModel(snags)
+	m.inflightStart = time.Now().Add(-90 * time.Second)
+	header := strings.Join(m.detailsHeaderLines(m.state.Snags[0]), "\n")
+	if !strings.Contains(header, "elapsed 1m30s") {
+		t.Errorf("expected elapsed line for inflight snag, got:\n%s", header)
+	}
+}
+
+func TestDetailsHeaderShowsDurationForFinished(t *testing.T) {
+	snags := []Snag{{ID: "a", Status: StatusComplete, Description: "task", Duration: "42s"}}
+	m := newTestModel(snags)
+	header := strings.Join(m.detailsHeaderLines(m.state.Snags[0]), "\n")
+	if !strings.Contains(header, "duration 42s") {
+		t.Errorf("expected duration line for complete snag, got:\n%s", header)
+	}
+	m.state.Snags[0].Duration = ""
+	header = strings.Join(m.detailsHeaderLines(m.state.Snags[0]), "\n")
+	if strings.Contains(header, "duration") {
+		t.Errorf("expected no duration line without data, got:\n%s", header)
 	}
 }

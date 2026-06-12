@@ -67,6 +67,7 @@ type Model struct {
 	width               int
 	height              int
 	cancelWork          context.CancelFunc
+	cancelMerge         context.CancelFunc
 	streamCh            chan tea.Msg
 	currentTool         string
 	currentText         string
@@ -158,14 +159,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		// Capture tail position before the resize changes the scroll limit.
+		atBottom := m.mode == viewDetails && m.detailsAtBottom()
 		m.width = msg.Width
 		m.height = msg.Height
 		m.input.SetWidth(msg.Width - 2)
 		m.input.SetHeight(m.computeInputHeight())
 		if m.mode == viewDetails {
-			if limit := m.detailsMaxScroll(); m.detailsScroll > limit {
-				m.detailsScroll = limit
-			}
+			m.detailsClampScroll(atBottom)
 		}
 
 	case spinner.TickMsg:
@@ -307,15 +308,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case mergeDoneMsg:
 		m.mergingID = ""
+		if m.cancelMerge != nil {
+			m.cancelMerge()
+			m.cancelMerge = nil
+		}
 		for i := range m.state.Snags {
 			if m.state.Snags[i].ID == msg.snagID {
 				if msg.success {
 					m.state.Snags[i].Status = StatusComplete
 					m.state.Snags[i].CommitHash = msg.commitHash
 					m.state.Snags[i].Branch = ""
-					if m.state.Snags[i].Notes == "" {
-						m.state.Snags[i].Notes = "merged by agent"
-					}
+					// Unconditional: failed snags carry stale failure notes
+					// ("merge conflict — branch preserved") that must not
+					// survive on a now-complete snag.
+					m.state.Snags[i].Notes = "merged by agent"
 					m.sessionCompletedIDs[msg.snagID] = true
 					if debugLog != nil {
 						debugLog.Printf("state change snag=%s failed → complete (agentic merge) hash=%s", msg.snagID, msg.commitHash)
@@ -363,34 +369,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = ""
 
 		if m.mode == viewDetails {
-			switch {
-			case key.Matches(msg, keys.Quit):
-				return m.quit()
-			case key.Matches(msg, keys.Escape), key.Matches(msg, keys.Enter):
-				m.mode = viewList
-				m.detailsID = ""
-				m.detailsScroll = 0
-				m.detailsEvents = nil
-			case key.Matches(msg, keys.Up):
-				if m.detailsScroll > 0 {
-					m.detailsScroll--
-				}
-			case key.Matches(msg, keys.Down):
-				if m.detailsScroll < m.detailsMaxScroll() {
-					m.detailsScroll++
-				}
-			case key.Matches(msg, keys.PgUp):
-				m.detailsScroll -= m.detailsPageSize()
-				if m.detailsScroll < 0 {
-					m.detailsScroll = 0
-				}
-			case key.Matches(msg, keys.PgDn):
-				m.detailsScroll += m.detailsPageSize()
-				if limit := m.detailsMaxScroll(); m.detailsScroll > limit {
-					m.detailsScroll = limit
-				}
-			}
-			return m, tea.Batch(cmds...)
+			return m.handleDetailsKey(msg)
 		}
 
 		if m.confirmingRevert {
@@ -580,7 +559,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if debugLog != nil {
 							debugLog.Printf("agentic merge started snag=%s branch=%s", snag.ID, snag.Branch)
 						}
-						cmds = append(cmds, agenticMergeCmd(m.projectRoot, m.defaultBranch, m.cfg, snag))
+						// Cancellable so quit() can kill the merge agent rather
+						// than orphaning it to commit after the app exits.
+						ctx, cancel := context.WithCancel(context.Background())
+						m.cancelMerge = cancel
+						cmds = append(cmds, agenticMergeCmd(ctx, m.projectRoot, m.defaultBranch, m.cfg, snag))
 					}
 				}
 			} else {
@@ -718,6 +701,9 @@ func (m Model) quit() (tea.Model, tea.Cmd) {
 	if m.cancelWork != nil {
 		m.cancelWork()
 	}
+	if m.cancelMerge != nil {
+		m.cancelMerge()
+	}
 	for i := range m.state.Snags {
 		if m.state.Snags[i].Status == StatusInflight {
 			m.state.Snags[i].Status = StatusPending
@@ -780,6 +766,18 @@ func displayTitle(s Snag) string {
 	return s.Description
 }
 
+// snagDuration is the run duration of a finished snag: the persisted Duration
+// when present, otherwise derived from the start/completion timestamps.
+func snagDuration(s Snag) string {
+	if s.Duration != "" {
+		return s.Duration
+	}
+	if !s.StartedAt.IsZero() && !s.CompletedAt.IsZero() {
+		return s.CompletedAt.Sub(s.StartedAt).Round(time.Second).String()
+	}
+	return ""
+}
+
 func (m Model) computeInputHeight() int {
 	w := m.width
 	if w <= 0 {
@@ -820,162 +818,6 @@ func (m *Model) clampView() {
 			m.viewOffset = minOffset
 		}
 	}
-}
-
-// --- Details page ---
-
-func (m Model) detailsSnag() (Snag, bool) {
-	for _, s := range m.state.Snags {
-		if s.ID == m.detailsID {
-			return s, true
-		}
-	}
-	return Snag{}, false
-}
-
-// wrapLines wraps s to width and returns the individual lines, unstyled.
-func wrapLines(s string, width int) []string {
-	if width < 1 {
-		width = 80
-	}
-	return strings.Split(lipgloss.NewStyle().Width(width).Render(s), "\n")
-}
-
-// styledWrap wraps s to width and styles each resulting line.
-func styledWrap(style lipgloss.Style, s string, width int) []string {
-	lines := wrapLines(s, width)
-	for i := range lines {
-		lines[i] = style.Render(lines[i])
-	}
-	return lines
-}
-
-func (m Model) detailsHeaderLines(s Snag) []string {
-	var lines []string
-	title := displayTitle(s)
-	lines = append(lines, styledWrap(titleStyle, title, m.width)...)
-	if s.Description != title {
-		lines = append(lines, wrapLines(s.Description, m.width)...)
-	}
-	meta := []string{"status " + string(s.Status)}
-	if s.Source == SourceMarker {
-		meta = append(meta, fmt.Sprintf("marker %s:%d", s.File, s.Line))
-	}
-	meta = append(meta, "created "+s.CreatedAt.Format("2006-01-02 15:04:05"))
-	if s.CommitHash != "" {
-		meta = append(meta, "commit "+s.CommitHash)
-	}
-	if s.Branch != "" {
-		meta = append(meta, "branch "+s.Branch)
-	}
-	for _, l := range meta {
-		lines = append(lines, faintStyle.Render(l))
-	}
-	if s.Notes != "" {
-		lines = append(lines, wrapLines(s.Notes, m.width)...)
-	}
-	lines = append(lines, strings.Repeat("─", m.width))
-	return lines
-}
-
-// transcriptLines renders transcript events as styled, width-wrapped lines.
-func transcriptLines(events []transcriptEvent, width int) []string {
-	if len(events) == 0 {
-		return []string{faintStyle.Render("no session log")}
-	}
-	var lines []string
-	for _, ev := range events {
-		switch ev.Type {
-		case "run_start":
-			ts := ev.Time
-			if t, err := time.Parse(time.RFC3339, ev.Time); err == nil {
-				ts = t.Format("15:04:05")
-			}
-			lines = append(lines, styledWrap(faintStyle, fmt.Sprintf("── %s · %s ──", ev.Label, ts), width)...)
-		case "text":
-			lines = append(lines, wrapLines(ev.Text, width)...)
-		case "tool":
-			detail := "» " + ev.Name
-			if ev.Detail != "" {
-				detail += "(" + ev.Detail + ")"
-			}
-			lines = append(lines, styledWrap(faintStyle, detail, width)...)
-		case "result":
-			if ev.Status == "success" {
-				lines = append(lines, styledWrap(greenStyle, "✓ "+ev.Notes, width)...)
-			} else {
-				lines = append(lines, styledWrap(redStyle, "✗ "+ev.Notes, width)...)
-			}
-		}
-	}
-	return lines
-}
-
-// detailsRegionHeight is the number of transcript lines that fit between the
-// fixed header and the status bar.
-func (m Model) detailsRegionHeight(headerLen int) int {
-	h := m.height - headerLen - 1
-	if h < 3 {
-		h = 3
-	}
-	return h
-}
-
-func (m Model) detailsPageSize() int {
-	s, ok := m.detailsSnag()
-	if !ok {
-		return 1
-	}
-	return m.detailsRegionHeight(len(m.detailsHeaderLines(s)))
-}
-
-func (m Model) detailsMaxScroll() int {
-	s, ok := m.detailsSnag()
-	if !ok {
-		return 0
-	}
-	region := m.detailsRegionHeight(len(m.detailsHeaderLines(s)))
-	maxScroll := len(transcriptLines(m.detailsEvents, m.width)) - region
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	return maxScroll
-}
-
-// refreshDetails re-reads the viewed snag's transcript. If the user was at
-// the bottom, follow the tail; otherwise keep position.
-func (m *Model) refreshDetails() {
-	atBottom := m.detailsScroll >= m.detailsMaxScroll()
-	m.detailsEvents = readTranscript(snagLogFile(m.projectRoot, m.detailsID))
-	if limit := m.detailsMaxScroll(); atBottom || m.detailsScroll > limit {
-		m.detailsScroll = limit
-	}
-}
-
-func (m Model) detailsView() string {
-	s, ok := m.detailsSnag()
-	if !ok {
-		return faintStyle.Render("no snag selected")
-	}
-	header := m.detailsHeaderLines(s)
-	region := m.detailsRegionHeight(len(header))
-	lines := transcriptLines(m.detailsEvents, m.width)
-
-	maxScroll := len(lines) - region
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	scroll := min(max(m.detailsScroll, 0), maxScroll)
-	end := min(scroll+region, len(lines))
-
-	out := make([]string, 0, m.height)
-	out = append(out, header...)
-	out = append(out, lines[scroll:end]...)
-	for len(out) < m.height-1 {
-		out = append(out, "")
-	}
-	out = append(out, faintStyle.Render("↑↓ scroll  pgup/pgdn page  esc back"))
-	return strings.Join(out, "\n")
 }
 
 func (m Model) View() string {
@@ -1087,10 +929,10 @@ func (m Model) renderRow(s Snag, pos int, selected bool) string {
 		line += faintStyle.Render("  " + elapsed)
 	}
 
-	if (s.Status == StatusComplete || s.Status == StatusFailed) && s.Duration != "" {
-		line += faintStyle.Render("  " + s.Duration)
-	} else if (s.Status == StatusComplete || s.Status == StatusFailed) && !s.StartedAt.IsZero() && !s.CompletedAt.IsZero() {
-		line += faintStyle.Render("  " + s.CompletedAt.Sub(s.StartedAt).Round(time.Second).String())
+	if s.Status == StatusComplete || s.Status == StatusFailed {
+		if d := snagDuration(s); d != "" {
+			line += faintStyle.Render("  " + d)
+		}
 	}
 
 	if s.Status == StatusInflight && m.working {
@@ -1156,21 +998,21 @@ func (m Model) statusBarStr() string {
 			s := visible[m.cursor]
 			if s.Status == StatusFailed {
 				if s.Branch != "" {
-					return "m agentic merge  r retry"
+					return "enter details  m agentic merge  r retry"
 				}
-				return "r retry"
+				return "enter details  r retry"
 			}
 			if s.Status == StatusPending {
-				return "e edit  backspace delete  ↑↓ navigate  alt+↑↓ reorder"
+				return "enter details  e edit  backspace delete  ↑↓ navigate  alt+↑↓ reorder"
 			}
 			if s.Status == StatusInflight {
-				return "↑↓ navigate"
+				return "enter details  ↑↓ navigate"
 			}
 			if s.Status == StatusComplete {
 				if s.CommitHash != "" {
-					return "backspace revert  tab toggle history  ↑↓ navigate"
+					return "enter details  backspace revert  tab toggle history  ↑↓ navigate"
 				}
-				return "tab toggle history  ↑↓ navigate"
+				return "enter details  tab toggle history  ↑↓ navigate"
 			}
 		}
 		return "tab toggle history  ↑↓ navigate"

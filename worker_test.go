@@ -526,7 +526,7 @@ func TestAgenticMergeCmdNoCommitIsFailure(t *testing.T) {
 
 	// Agent claims success without committing anything.
 	writeStubClaude(t, stubSuccessResult)
-	msg, ok := agenticMergeCmd(dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
+	msg, ok := agenticMergeCmd(context.Background(), dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
 	if !ok {
 		t.Fatal("expected mergeDoneMsg")
 	}
@@ -555,7 +555,7 @@ func TestAgenticMergeCmdVerifiedCommitSucceeds(t *testing.T) {
 		"git merge --squash snag/agm002 >/dev/null 2>&1\n"+
 			"git commit -m 'snag: change file' >/dev/null 2>&1\n"+
 			stubSuccessResult)
-	msg := agenticMergeCmd(dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
+	msg := agenticMergeCmd(context.Background(), dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
 	if !msg.success {
 		t.Fatalf("expected success, got errMsg=%q", msg.errMsg)
 	}
@@ -580,7 +580,7 @@ func TestAgenticMergeCmdForeignCommitIsFailure(t *testing.T) {
 			"git add user.txt >/dev/null 2>&1\n"+
 			"git commit -m 'unrelated user commit' >/dev/null 2>&1\n"+
 			stubSuccessResult)
-	msg := agenticMergeCmd(dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
+	msg := agenticMergeCmd(context.Background(), dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
 	if msg.success {
 		t.Fatal("expected failure when HEAD advanced without a snag commit")
 	}
@@ -611,7 +611,7 @@ func TestAgenticMergeCmdFailureResetsConflict(t *testing.T) {
 	writeStubClaude(t,
 		"git merge --squash snag/agm003 >/dev/null 2>&1\n"+
 			`echo '{"type":"result","structured_output":{"status":"failed","notes":"could not resolve"}}'`)
-	msg := agenticMergeCmd(dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
+	msg := agenticMergeCmd(context.Background(), dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
 	if msg.success {
 		t.Fatal("expected failure")
 	}
@@ -626,6 +626,36 @@ func TestAgenticMergeCmdFailureResetsConflict(t *testing.T) {
 	}
 	if !branchExists(dir, "snag/agm003") {
 		t.Error("branch snag/agm003 must be preserved on failure")
+	}
+}
+
+func TestAgenticMergeCmdCancelled(t *testing.T) {
+	dir := initMergeTestRepo(t)
+	snag := Snag{ID: "agm005", Description: "change file"}
+	startSnagBranch(t, dir, snag.ID, "snag version\n")
+	removeWorktreeOnly(dir, snag.ID)
+	preHead := headCommitHash(dir)
+
+	// Quit cancels the context before/while the agent runs; the merge must
+	// fail without touching the default branch, and the branch must survive.
+	writeStubClaude(t, "sleep 5\n"+stubSuccessResult)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	msg, ok := agenticMergeCmd(ctx, dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
+	if !ok {
+		t.Fatal("expected mergeDoneMsg")
+	}
+	if msg.success {
+		t.Fatal("expected failure on cancellation")
+	}
+	if msg.errMsg != "cancelled" {
+		t.Errorf("expected errMsg 'cancelled', got %q", msg.errMsg)
+	}
+	if headCommitHash(dir) != preHead {
+		t.Error("HEAD must not move on a cancelled merge")
+	}
+	if !branchExists(dir, "snag/agm005") {
+		t.Error("branch snag/agm005 must be preserved on cancellation")
 	}
 }
 

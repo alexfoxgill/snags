@@ -83,12 +83,31 @@ func LoadState(projectRoot string) (State, error) {
 	return s, nil
 }
 
+// SaveState writes state.yaml atomically (temp file + rename). BubbleTea runs
+// save commands on goroutines, so saves can race; rename ensures a reader or
+// competing saver never sees a half-written file.
 func SaveState(projectRoot string, s State) error {
 	data, err := yaml.Marshal(s)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(stateFile(projectRoot), data, 0644)
+	tmp, err := os.CreateTemp(snagDir(projectRoot), "state-*.yaml.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // no-op once the rename has succeeded
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), stateFile(projectRoot))
 }
 
 func snagLogFile(projectRoot, snagID string) string {
