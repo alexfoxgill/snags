@@ -75,34 +75,64 @@ type streamLine struct {
 }
 
 func detectDefaultBranch(projectRoot string) string {
+	branchExists := func(name string) bool {
+		return exec.Command("git", "-C", projectRoot, "rev-parse", "--verify", "refs/heads/"+name).Run() == nil
+	}
 	cmd := exec.Command("git", "-C", projectRoot, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
 	if out, err := cmd.Output(); err == nil {
-		parts := strings.SplitN(strings.TrimSpace(string(out)), "/", 2)
-		if len(parts) == 2 {
-			return parts[1]
+		name := strings.TrimSpace(string(out))
+		if parts := strings.SplitN(name, "/", 2); len(parts) == 2 {
+			name = parts[1]
 		}
-		return strings.TrimSpace(string(out))
+		if branchExists(name) {
+			return name
+		}
 	}
 	for _, b := range []string{"main", "master"} {
-		if exec.Command("git", "-C", projectRoot, "rev-parse", "--verify", b).Run() == nil {
+		if branchExists(b) {
 			return b
 		}
 	}
+	// No conventional default branch (e.g. neo4j's "dev"): base snags on
+	// whatever branch is checked out.
+	if b, err := currentBranch(projectRoot); err == nil {
+		return b
+	}
 	return "main"
+}
+
+// currentBranch returns the branch HEAD is on; it errors on detached HEAD.
+func currentBranch(projectRoot string) (string, error) {
+	out, err := exec.Command("git", "-C", projectRoot, "symbolic-ref", "--short", "HEAD").Output()
+	if err != nil {
+		return "", fmt.Errorf("could not determine current branch (detached HEAD?): %s", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// baseBranchFor picks the branch a snag's worktree is created from and merged
+// into. Marker snags always base on the current branch: the marker lives in
+// the working tree of whatever branch the user is on, which may not be the
+// default branch. Input snags use the default branch.
+func baseBranchFor(projectRoot string, snag Snag, defaultBranch string) (string, error) {
+	if snag.Source != SourceMarker {
+		return defaultBranch, nil
+	}
+	return currentBranch(projectRoot)
 }
 
 func worktreePath(projectRoot, snagID string) string {
 	return filepath.Join(projectRoot, ".snags", "worktrees", snagID)
 }
 
-func createWorktree(projectRoot, snagID, defaultBranch string) error {
+func createWorktree(projectRoot, snagID, baseBranch string) error {
 	path := worktreePath(projectRoot, snagID)
 	// Defensive cleanup in case a prior run crashed and left an orphan
 	exec.Command("git", "-C", projectRoot, "worktree", "remove", "--force", path).Run()
 	exec.Command("git", "-C", projectRoot, "branch", "-D", "snag/"+snagID).Run()
 
 	cmd := exec.Command("git", "-C", projectRoot, "worktree", "add",
-		path, "-b", "snag/"+snagID, defaultBranch)
+		path, "-b", "snag/"+snagID, baseBranch)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("worktree add: %s: %s", err, strings.TrimSpace(string(out)))
@@ -395,24 +425,24 @@ func hasStagedChanges(dir string) bool {
 	return cmd.Run() != nil
 }
 
-// requireDefaultBranch errors unless HEAD in projectRoot is on defaultBranch.
+// requireBaseBranch errors unless HEAD in projectRoot is on baseBranch.
 // action names the operation for the error message ("running snags", "merging").
-func requireDefaultBranch(projectRoot, defaultBranch, action string) error {
+func requireBaseBranch(projectRoot, baseBranch, action string) error {
 	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 	cmd.Dir = projectRoot
 	out, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("could not determine current branch: %s", err)
 	}
-	currentBranch := strings.TrimSpace(string(out))
-	if currentBranch != defaultBranch {
-		return fmt.Errorf("not on %s (currently on %s) — switch to %s before %s", defaultBranch, currentBranch, defaultBranch, action)
+	current := strings.TrimSpace(string(out))
+	if current != baseBranch {
+		return fmt.Errorf("not on %s (currently on %s) — switch to %s before %s", baseBranch, current, baseBranch, action)
 	}
 	return nil
 }
 
-func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) error {
-	if err := requireDefaultBranch(projectRoot, defaultBranch, "running snags"); err != nil {
+func squashMerge(projectRoot, snagID, description, notes, baseBranch string) error {
+	if err := requireBaseBranch(projectRoot, baseBranch, "running snags"); err != nil {
 		return err
 	}
 
@@ -494,7 +524,7 @@ func headCommitHash(projectRoot string) string {
 // retry the merge agentically. Each merge failure is also written to the
 // snag's transcript via tl, so the log doesn't end on the agent's success
 // while the snag shows failed.
-func mergeStage(projectRoot, defaultBranch string, snag Snag, notes string, cfg Config, tl *transcriptLogger) (msg snagDoneMsg) {
+func mergeStage(projectRoot, baseBranch string, snag Snag, notes string, cfg Config, tl *transcriptLogger) (msg snagDoneMsg) {
 	defer func() {
 		if msg.mergeFailed {
 			tl.result(false, msg.notes)
@@ -509,7 +539,7 @@ func mergeStage(projectRoot, defaultBranch string, snag Snag, notes string, cfg 
 		}
 	}
 
-	mergeErr := squashMerge(projectRoot, snag.ID, snag.Description, notes, defaultBranch)
+	mergeErr := squashMerge(projectRoot, snag.ID, snag.Description, notes, baseBranch)
 	switch {
 	case mergeErr == nil:
 		// merged + committed cleanly
@@ -548,7 +578,12 @@ func mergeStage(projectRoot, defaultBranch string, snag Snag, notes string, cfg 
 func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag, cfg Config) chan tea.Msg {
 	ch := make(chan tea.Msg, 64)
 	go func() {
-		if err := createWorktree(projectRoot, snag.ID, defaultBranch); err != nil {
+		baseBranch, err := baseBranchFor(projectRoot, snag, defaultBranch)
+		if err != nil {
+			ch <- snagDoneMsg{snagID: snag.ID, success: false, notes: err.Error()}
+			return
+		}
+		if err := createWorktree(projectRoot, snag.ID, baseBranch); err != nil {
 			ch <- snagDoneMsg{snagID: snag.ID, success: false, notes: err.Error()}
 			return
 		}
@@ -595,7 +630,7 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag, 
 		}
 
 		ch <- snagProgressMsg{snagID: snag.ID, activity: "merging"}
-		ch <- mergeStage(projectRoot, defaultBranch, snag, notes, cfg, tl)
+		ch <- mergeStage(projectRoot, baseBranch, snag, notes, cfg, tl)
 	}()
 	return ch
 }
@@ -607,10 +642,15 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag, 
 // applies and the branch is preserved.
 func agenticMergeCmd(ctx context.Context, projectRoot, defaultBranch string, cfg Config, snag Snag) tea.Cmd {
 	return func() tea.Msg {
-		// Same guard as squashMerge: if the user switched branches since the
-		// snag failed, the agent would merge in the wrong place and the
-		// preserved branch would still be deleted.
-		if err := requireDefaultBranch(projectRoot, defaultBranch, "merging"); err != nil {
+		// Marker snags merge into the current branch by definition; for input
+		// snags the guard catches a user who switched branches since the snag
+		// failed — the agent would merge in the wrong place and the preserved
+		// branch would still be deleted.
+		baseBranch, err := baseBranchFor(projectRoot, snag, defaultBranch)
+		if err != nil {
+			return mergeDoneMsg{snagID: snag.ID, success: false, errMsg: err.Error()}
+		}
+		if err := requireBaseBranch(projectRoot, baseBranch, "merging"); err != nil {
 			return mergeDoneMsg{snagID: snag.ID, success: false, errMsg: err.Error()}
 		}
 
@@ -623,7 +663,7 @@ func agenticMergeCmd(ctx context.Context, projectRoot, defaultBranch string, cfg
 				"Perform `git merge --squash snag/%s` into %s, resolving any conflicts in favor of the task's intent, "+
 				"then commit with: git commit -m %q\n\n"+
 				"Do not commit unrelated local changes.",
-			snag.ID, snag.Description, snag.ID, defaultBranch, "snag: "+snag.Description)
+			snag.ID, snag.Description, snag.ID, baseBranch, "snag: "+snag.Description)
 		if snag.Source == SourceMarker {
 			prompt += fmt.Sprintf(
 				"\n\nIf an inline comment marker `%s: %s` remains at %s, remove it before committing.",

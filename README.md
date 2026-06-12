@@ -52,7 +52,7 @@ Type a task description and press **Enter** to add it to the queue. Snags are pr
 
 1. Snags are persisted to `.snags/state.yaml` in the repo root (gitignored).
 2. When processing starts, Claude Code runs in a fresh worktree at `.snags/worktrees/<id>` on branch `snag/<id>`.
-3. On success, the worktree is squash-merged back to your default branch and removed.
+3. On success, the worktree is squash-merged back and removed. Typed snags merge to your default branch; marker snags merge to the branch you were on when the snag ran.
 4. On failure, the snag is marked failed and can be retried with `r`.
 5. Merge conflicts preserve branch `snag/<id>`. Press `m` to run an agentic merge that resolves them.
 
@@ -70,6 +70,8 @@ Supported comment styles: `//`, `#`, `--`, `/* */`, `<!-- -->`. Continuation lin
 # snag: refactor this loop to use list
 # comprehension and handle the empty case
 ```
+
+Marker snags base on and merge back to the current branch — markers live in your checkout, which may not be the default branch.
 
 On success the marker comment is deleted before the squash commit. Markers already committed to HEAD are skipped — the agent's branch deletion propagates via the merge.
 

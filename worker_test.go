@@ -144,6 +144,108 @@ func TestDetectDefaultBranchMaster(t *testing.T) {
 	}
 }
 
+func TestDetectDefaultBranchFallsBackToCurrentBranch(t *testing.T) {
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Run()
+	}
+	run("init", "-b", "dev")
+	run("config", "user.email", "test@test.com")
+	run("config", "user.name", "Test")
+	run("commit", "--allow-empty", "-m", "init")
+	run("checkout", "-b", "feature-x")
+
+	branch := detectDefaultBranch(dir)
+	if branch != "feature-x" {
+		t.Errorf("expected feature-x, got %q", branch)
+	}
+}
+
+func TestDetectDefaultBranchIgnoresUnresolvableOriginHead(t *testing.T) {
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Run()
+	}
+	run("init", "-b", "dev")
+	run("config", "user.email", "test@test.com")
+	run("config", "user.name", "Test")
+	run("commit", "--allow-empty", "-m", "init")
+	// origin/HEAD points at origin/main, but no local main exists.
+	run("update-ref", "refs/remotes/origin/main", "HEAD")
+	run("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+	branch := detectDefaultBranch(dir)
+	if branch != "dev" {
+		t.Errorf("expected dev, got %q", branch)
+	}
+}
+
+func TestBaseBranchForMarkerUsesCurrentBranch(t *testing.T) {
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Run()
+	}
+	run("init", "-b", "main")
+	run("config", "user.email", "test@test.com")
+	run("config", "user.name", "Test")
+	run("commit", "--allow-empty", "-m", "init")
+	run("checkout", "-b", "feature-x")
+
+	branch, err := baseBranchFor(dir, Snag{Source: SourceMarker}, "main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if branch != "feature-x" {
+		t.Errorf("expected feature-x, got %q", branch)
+	}
+}
+
+func TestBaseBranchForInputUsesDefaultBranch(t *testing.T) {
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Run()
+	}
+	run("init", "-b", "main")
+	run("config", "user.email", "test@test.com")
+	run("config", "user.name", "Test")
+	run("commit", "--allow-empty", "-m", "init")
+	run("checkout", "-b", "feature-x")
+
+	branch, err := baseBranchFor(dir, Snag{Source: SourceInput}, "main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if branch != "main" {
+		t.Errorf("expected main, got %q", branch)
+	}
+}
+
+func TestBaseBranchForMarkerDetachedHead(t *testing.T) {
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Run()
+	}
+	run("init", "-b", "main")
+	run("config", "user.email", "test@test.com")
+	run("config", "user.name", "Test")
+	run("commit", "--allow-empty", "-m", "init")
+	run("checkout", "--detach")
+
+	if _, err := baseBranchFor(dir, Snag{Source: SourceMarker}, "main"); err == nil {
+		t.Error("expected error on detached HEAD")
+	}
+}
+
 func TestClaudeArgsDefault(t *testing.T) {
 	cfg := DefaultConfig().Agents.Snag // model=fable effort=low
 	args := claudeArgs(cfg, "do the thing", "{}")
