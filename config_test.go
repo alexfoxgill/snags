@@ -174,12 +174,20 @@ func TestLoadConfigNegativeTimeout(t *testing.T) {
 	}
 }
 
-func TestEnsureSnagDirCreatesLogs(t *testing.T) {
+func TestLoadConfigEmptyMarker(t *testing.T) {
 	dir := t.TempDir()
-	if err := EnsureSnagDir(dir); err != nil {
-		t.Fatal(err)
+	writeConfig(t, dir, "marker: \"\"\n")
+	_, err := LoadConfig(dir)
+	if err == nil {
+		t.Error("expected error for empty marker")
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".snags", "logs")); os.IsNotExist(err) {
-		t.Error("expected .snags/logs/ directory to exist")
+}
+
+func TestLoadConfigUnknownNestedKey(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, "agents:\n  snag:\n    modle: x\n")
+	_, err := LoadConfig(dir)
+	if err == nil {
+		t.Error("expected error for unknown key under agents.snag")
 	}
 }

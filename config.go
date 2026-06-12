@@ -96,6 +96,9 @@ func LoadConfig(projectRoot string) (Config, error) {
 }
 
 func validateConfig(cfg Config) error {
+	if cfg.Marker == "" {
+		return fmt.Errorf("marker keyword must not be empty")
+	}
 	agents := []struct {
 		name string
 		ac   AgentConfig
@@ -104,6 +107,7 @@ func validateConfig(cfg Config) error {
 		{"agents.summary", cfg.Agents.Summary},
 		{"agents.merge", cfg.Agents.Merge},
 	}
+	// Empty effort is allowed: it means the --effort flag is omitted and the CLI default applies.
 	valid := map[string]bool{"": true, "low": true, "medium": true, "high": true}
 	for _, a := range agents {
 		if !valid[a.ac.Effort] {

@@ -50,7 +50,7 @@ func main() {
 
 	cfg, err := LoadConfig(projectRoot)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: invalid config: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: could not load config: %v\n", err)
 		os.Exit(1)
 	}
 
