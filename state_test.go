@@ -47,6 +47,35 @@ func TestSaveLoadRoundtrip(t *testing.T) {
 	}
 }
 
+// yaml.v3 emits unparseable block scalars for nested multi-line strings whose
+// first line starts with a space (go-yaml/yaml#610) — exactly what marker
+// context excerpts look like.
+func TestSaveLoadRoundtripContextLeadingSpace(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".snags"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	context := fragileString(" * comment continuation line\n */\ncase class FuzzConfig(\n  focus: Option[FocusSpec] = None,")
+	state := State{Snags: []Snag{
+		{ID: "abc123", Description: "test snag", Status: StatusFailed,
+			Notes:   "worktree add: exit status 255\nfatal: not a valid object name: 'main'",
+			Source:  SourceMarker,
+			File:    "Foo.scala",
+			Line:    97,
+			Context: context},
+	}}
+	if err := SaveState(dir, state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadState(dir)
+	if err != nil {
+		t.Fatalf("state written by SaveState failed to load: %v", err)
+	}
+	if loaded.Snags[0].Context != context {
+		t.Errorf("context mismatch:\nwant %q\ngot  %q", context, loaded.Snags[0].Context)
+	}
+}
+
 func TestSaveStateLeavesNoTempFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".snags"), 0755); err != nil {

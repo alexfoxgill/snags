@@ -104,7 +104,7 @@ func (m Model) detailsHeaderLines(s Snag) []string {
 		lines = append(lines, faintStyle.Render(l))
 	}
 	if s.Notes != "" {
-		lines = append(lines, wrapLines(s.Notes, m.width)...)
+		lines = append(lines, wrapLines(string(s.Notes), m.width)...)
 	}
 	lines = append(lines, strings.Repeat("─", m.width))
 	return lines

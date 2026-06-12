@@ -27,22 +27,41 @@ const (
 	SourceMarker = "marker"
 )
 
+// fragileString holds free text (agent notes, marker context excerpts) that
+// yaml.v3 cannot always roundtrip: a multi-line value whose first character
+// is a space, tab, or newline is emitted as a block scalar with an
+// indentation indicator that is wrong at nested levels (go-yaml/yaml#610),
+// producing a file the parser rejects. Such values are emitted double-quoted
+// instead.
+type fragileString string
+
+func (f fragileString) MarshalYAML() (interface{}, error) {
+	s := string(f)
+	if strings.Contains(s, "\n") {
+		switch s[0] {
+		case ' ', '\t', '\n':
+			return &yaml.Node{Kind: yaml.ScalarNode, Style: yaml.DoubleQuotedStyle, Tag: "!!str", Value: s}, nil
+		}
+	}
+	return s, nil
+}
+
 type Snag struct {
-	ID          string     `yaml:"id"`
-	Description string     `yaml:"description"`
-	Status      SnagStatus `yaml:"status"`
-	CreatedAt   time.Time  `yaml:"created_at"`
-	StartedAt   time.Time  `yaml:"started_at,omitempty"`
-	CompletedAt time.Time  `yaml:"completed_at,omitempty"`
-	Duration    string     `yaml:"duration,omitempty"`
-	Branch      string     `yaml:"branch,omitempty"`
-	Notes       string     `yaml:"notes,omitempty"`
-	CommitHash  string     `yaml:"commit_hash,omitempty"`
-	Source      string     `yaml:"source,omitempty"`
-	File        string     `yaml:"file,omitempty"`
-	Line        int        `yaml:"line,omitempty"`
-	Context     string     `yaml:"context,omitempty"`
-	Summary     string     `yaml:"summary,omitempty"`
+	ID          string        `yaml:"id"`
+	Description string        `yaml:"description"`
+	Status      SnagStatus    `yaml:"status"`
+	CreatedAt   time.Time     `yaml:"created_at"`
+	StartedAt   time.Time     `yaml:"started_at,omitempty"`
+	CompletedAt time.Time     `yaml:"completed_at,omitempty"`
+	Duration    string        `yaml:"duration,omitempty"`
+	Branch      string        `yaml:"branch,omitempty"`
+	Notes       fragileString `yaml:"notes,omitempty"`
+	CommitHash  string        `yaml:"commit_hash,omitempty"`
+	Source      string        `yaml:"source,omitempty"`
+	File        string        `yaml:"file,omitempty"`
+	Line        int           `yaml:"line,omitempty"`
+	Context     fragileString `yaml:"context,omitempty"`
+	Summary     string        `yaml:"summary,omitempty"`
 }
 
 type State struct {

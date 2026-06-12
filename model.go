@@ -227,7 +227,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						debugLog.Printf("state change snag=%s inflight → failed notes=%q", msg.snagID, msg.notes)
 					}
 				}
-				m.state.Snags[i].Notes = msg.notes
+				m.state.Snags[i].Notes = fragileString(msg.notes)
 				m.state.Snags[i].CompletedAt = time.Now()
 				if !m.state.Snags[i].StartedAt.IsZero() {
 					m.state.Snags[i].Duration = m.state.Snags[i].CompletedAt.Sub(m.state.Snags[i].StartedAt).Round(time.Second).String()
@@ -265,7 +265,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Source:      SourceMarker,
 				File:        mk.File,
 				Line:        mk.Line,
-				Context:     mk.Context,
+				Context:     fragileString(mk.Context),
 			}
 			m.state.Snags = append(m.state.Snags, snag)
 			added++
@@ -329,7 +329,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				} else {
 					// Stays failed; the worker preserved the branch.
-					m.state.Snags[i].Notes = msg.errMsg
+					m.state.Snags[i].Notes = fragileString(msg.errMsg)
 					if debugLog != nil {
 						debugLog.Printf("agentic merge failed snag=%s err=%q", msg.snagID, msg.errMsg)
 					}
@@ -355,7 +355,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						debugLog.Printf("state change snag=%s complete → reverted", msg.snagID)
 					}
 				} else {
-					m.state.Snags[i].Notes = msg.errMsg
+					m.state.Snags[i].Notes = fragileString(msg.errMsg)
 					if debugLog != nil {
 						debugLog.Printf("revert failed snag=%s err=%q", msg.snagID, msg.errMsg)
 					}
@@ -755,7 +755,7 @@ func scanCmd(projectRoot, keyword string) tea.Cmd {
 
 func summaryCmd(projectRoot string, cfg AgentConfig, snag Snag) tea.Cmd {
 	return func() tea.Msg {
-		summary, err := runSummary(context.Background(), projectRoot, cfg, snag.Description, snag.Context)
+		summary, err := runSummary(context.Background(), projectRoot, cfg, snag.Description, string(snag.Context))
 		return summaryDoneMsg{snagID: snag.ID, summary: summary, err: err}
 	}
 }
@@ -981,7 +981,7 @@ func (m Model) selectedNotes() string {
 		return m.currentText
 	}
 	if (s.Status == StatusComplete || s.Status == StatusFailed) && s.Notes != "" {
-		return s.Notes
+		return string(s.Notes)
 	}
 	if s.Status == StatusPending && s.Source == SourceMarker && s.Notes == "" {
 		return fmt.Sprintf("from %s:%d", s.File, s.Line)

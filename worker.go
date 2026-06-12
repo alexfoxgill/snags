@@ -603,7 +603,7 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag, 
 
 		prompt := buildPrompt(snag.Description)
 		if snag.Source == SourceMarker {
-			prompt = buildMarkerPrompt(snag.Description, snag.File, snag.Line, snag.Context)
+			prompt = buildMarkerPrompt(snag.Description, snag.File, snag.Line, string(snag.Context))
 		}
 
 		success, notes, err := runClaudeHeadless(ctx, worktreePath(projectRoot, snag.ID), prompt, cfg.Agents.Snag, tl, onActivity)
