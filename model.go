@@ -181,6 +181,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.state.Snags[i].Notes = msg.notes
+				m.state.Snags[i].CompletedAt = time.Now()
 				break
 			}
 		}
@@ -481,6 +482,7 @@ func (m Model) startNextSnag() (Model, tea.Cmd) {
 			}
 			m.working = true
 			m.inflightStart = time.Now()
+			m.state.Snags[i].StartedAt = m.inflightStart
 			ctx, cancel := context.WithCancel(context.Background())
 			m.cancelWork = cancel
 			ch := RunSnag(ctx, m.projectRoot, m.defaultBranch, m.state.Snags[i])
@@ -657,6 +659,11 @@ func (m Model) renderRow(s Snag, pos int, selected bool) string {
 	if s.Status == StatusInflight && !m.inflightStart.IsZero() {
 		elapsed := time.Since(m.inflightStart).Round(time.Second).String()
 		line += faintStyle.Render("  " + elapsed)
+	}
+
+	if (s.Status == StatusComplete || s.Status == StatusFailed) && !s.StartedAt.IsZero() && !s.CompletedAt.IsZero() {
+		duration := s.CompletedAt.Sub(s.StartedAt).Round(time.Second).String()
+		line += faintStyle.Render("  " + duration)
 	}
 
 	if s.Status == StatusInflight && m.working {
