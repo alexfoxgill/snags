@@ -19,7 +19,7 @@ const maxVisible = 10
 type focusArea int
 
 const (
-	focusList  focusArea = iota
+	focusList focusArea = iota
 	focusInput
 )
 
@@ -35,27 +35,27 @@ var (
 )
 
 type Model struct {
-	state                State
-	cfg                  Config
-	cursor               int
-	viewOffset           int
-	focus                focusArea
-	input                textarea.Model
-	spinner              spinner.Model
-	paused               bool
-	working              bool
-	projectRoot          string
-	defaultBranch        string
-	width                int
-	cancelWork           context.CancelFunc
-	streamCh             chan tea.Msg
-	currentTool          string
-	currentText          string
-	inflightStart        time.Time
-	sessionCompletedIDs  map[string]bool
-	lastTitle            string
-	showHistory          bool
-	confirmingRevert     bool
+	state               State
+	cfg                 Config
+	cursor              int
+	viewOffset          int
+	focus               focusArea
+	input               textarea.Model
+	spinner             spinner.Model
+	paused              bool
+	working             bool
+	projectRoot         string
+	defaultBranch       string
+	width               int
+	cancelWork          context.CancelFunc
+	streamCh            chan tea.Msg
+	currentTool         string
+	currentText         string
+	inflightStart       time.Time
+	sessionCompletedIDs map[string]bool
+	lastTitle           string
+	showHistory         bool
+	confirmingRevert    bool
 }
 
 func waitForSnagEvent(ch chan tea.Msg) tea.Cmd {
@@ -227,7 +227,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cursor < len(visible) {
 					snag := visible[m.cursor]
 					if snag.CommitHash != "" {
-						cmds = append(cmds, revertSnag(m.projectRoot, snag.ID, snag.Description, snag.CommitHash))
+						cmds = append(cmds, revertSnag(m.projectRoot, snag.ID, snag.Description, snag.CommitHash, m.cfg))
 					}
 				}
 			case key.Matches(msg, keys.Escape):
@@ -490,7 +490,7 @@ func (m Model) startNextSnag() (Model, tea.Cmd) {
 			m.state.Snags[i].StartedAt = m.inflightStart
 			ctx, cancel := context.WithCancel(context.Background())
 			m.cancelWork = cancel
-			ch := RunSnag(ctx, m.projectRoot, m.defaultBranch, m.state.Snags[i])
+			ch := RunSnag(ctx, m.projectRoot, m.defaultBranch, m.state.Snags[i], m.cfg)
 			m.streamCh = ch
 			return m, waitForSnagEvent(ch)
 		}

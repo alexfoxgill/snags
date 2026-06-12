@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -16,8 +17,9 @@ import (
 )
 
 // Sentinel errors from squashMerge so the caller can distinguish a real merge
-// conflict (which warrants spawning the resolver) from a no-op merge (where
-// the snag branch had no effective changes vs the default branch).
+// conflict (which warrants preserving the snag branch for a retry) from a
+// no-op merge (where the snag branch had no effective changes vs the default
+// branch).
 var (
 	errNothingToMerge = errors.New("nothing to merge")
 	errMergeConflict  = errors.New("merge conflict")
@@ -28,12 +30,22 @@ type snagDoneMsg struct {
 	success    bool
 	notes      string
 	commitHash string
+	// mergeFailed marks a merge-stage failure: the agent's work is intact on
+	// branch snag/<id>, only merging it back failed.
+	mergeFailed bool
 }
 
 type revertDoneMsg struct {
 	snagID  string
 	success bool
 	errMsg  string
+}
+
+type mergeDoneMsg struct {
+	snagID     string
+	success    bool
+	commitHash string
+	errMsg     string
 }
 
 type snagProgressMsg struct {
@@ -97,10 +109,83 @@ func createWorktree(projectRoot, snagID, defaultBranch string) error {
 	return nil
 }
 
-func removeWorktree(projectRoot, snagID string) {
+func removeWorktreeOnly(projectRoot, snagID string) {
 	exec.Command("git", "-C", projectRoot, "worktree", "remove", "--force",
 		worktreePath(projectRoot, snagID)).Run()
+}
+
+func deleteSnagBranch(projectRoot, snagID string) {
 	exec.Command("git", "-C", projectRoot, "branch", "-D", "snag/"+snagID).Run()
+}
+
+func removeWorktree(projectRoot, snagID string) {
+	removeWorktreeOnly(projectRoot, snagID)
+	deleteSnagBranch(projectRoot, snagID)
+}
+
+// transcriptEvent is one line of a snag's .snags/logs/<id>.jsonl transcript.
+type transcriptEvent struct {
+	Type   string `json:"type"`
+	Label  string `json:"label,omitempty"`
+	Time   string `json:"time,omitempty"`
+	Text   string `json:"text,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Detail string `json:"detail,omitempty"`
+	Status string `json:"status,omitempty"`
+	Notes  string `json:"notes,omitempty"`
+}
+
+// transcriptLogger appends events to a snag's transcript log. All methods are
+// nil-receiver safe and best-effort: logging failures never break a run.
+type transcriptLogger struct {
+	f *os.File
+}
+
+func newTranscriptLogger(projectRoot, snagID string) *transcriptLogger {
+	path := snagLogFile(projectRoot, snagID)
+	os.MkdirAll(filepath.Dir(path), 0755)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil
+	}
+	return &transcriptLogger{f: f}
+}
+
+func (t *transcriptLogger) write(ev transcriptEvent) {
+	if t == nil || t.f == nil {
+		return
+	}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	t.f.Write(append(data, '\n'))
+}
+
+func (t *transcriptLogger) runStart(label string) {
+	t.write(transcriptEvent{Type: "run_start", Label: label, Time: time.Now().Format(time.RFC3339)})
+}
+
+func (t *transcriptLogger) text(text string) {
+	t.write(transcriptEvent{Type: "text", Text: text})
+}
+
+func (t *transcriptLogger) tool(name, detail string) {
+	t.write(transcriptEvent{Type: "tool", Name: name, Detail: detail})
+}
+
+func (t *transcriptLogger) result(success bool, notes string) {
+	status := "failed"
+	if success {
+		status = "success"
+	}
+	t.write(transcriptEvent{Type: "result", Status: status, Notes: notes})
+}
+
+func (t *transcriptLogger) Close() {
+	if t != nil && t.f != nil {
+		t.f.Close()
+	}
 }
 
 func buildPrompt(description string) string {
@@ -113,6 +198,31 @@ Snag: %s
 Complete the task fully. Your final response must be a JSON object with:
 - "status": "success" if the task is complete, or "failed" if you could not complete it
 - "notes": any assumptions you made, decisions you took, or (if failed) why you could not complete it`, description)
+}
+
+// buildMarkerPrompt is buildPrompt for snags discovered via inline comment
+// markers: it points the agent at the marker's location and makes removing
+// the marker comment part of the task.
+func buildMarkerPrompt(description, file string, line int, context string) string {
+	const fence = "```"
+	return fmt.Sprintf(`You are working autonomously in a git worktree to complete a small code change (a "snag").
+The project is already checked out. Do not ask for clarification — use your best judgement.
+If the request is ambiguous, pick the most plausible interpretation, do it, and explain the choice in notes.
+
+Snag: %s
+
+This request came from an inline comment marker at %s:%d. Surrounding code at the time of discovery:
+
+%s
+%s
+%s
+
+If the marker comment containing this request still exists in the checkout, removing it is part of the task.
+
+Complete the task fully. Your final response must be a JSON object with:
+- "status": "success" if the task is complete, or "failed" if you could not complete it
+- "notes": any assumptions you made, decisions you took, or (if failed) why you could not complete it`,
+		description, file, line, fence, context, fence)
 }
 
 // extractToolDetail returns a short human-readable detail string for the given tool and its JSON input.
@@ -141,22 +251,13 @@ func extractToolDetail(toolName, inputJSON string) string {
 	return v
 }
 
-// runClaudeHeadless runs claude headless in dir with the given prompt.
-// onActivity is called with a kind ("tool" or "text") and description for each agent event (may be nil).
-func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(kind, activity string)) (success bool, notes string, err error) {
-	start := time.Now()
-	if debugLog != nil {
-		debugLog.Printf("agent start dir=%s", dir)
+// claudeArgs builds the claude argv (excluding the binary name) for a headless run.
+func claudeArgs(cfg AgentConfig, prompt, schema string) []string {
+	args := []string{"--model", cfg.Model}
+	if cfg.Effort != "" {
+		args = append(args, "--effort", cfg.Effort)
 	}
-	defer func() {
-		if debugLog != nil {
-			debugLog.Printf("agent done dir=%s duration=%s success=%v notes=%q", dir, time.Since(start).Round(time.Millisecond), success, notes)
-		}
-	}()
-
-	const schema = `{"type":"object","properties":{"status":{"type":"string","enum":["success","failed"]},"notes":{"type":"string"}},"required":["status"]}`
-	cmd := exec.CommandContext(ctx, "claude",
-		"--model", "claude-sonnet-4-6",
+	args = append(args,
 		"-p", prompt,
 		"--output-format", "stream-json",
 		"--verbose",
@@ -172,6 +273,41 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(
 		"--exclude-dynamic-system-prompt-sections",
 		"--settings", `{"autoMode":{"environment":["$defaults"]}}`,
 	)
+	return append(args, cfg.ExtraArgs...)
+}
+
+// ctxNotes describes why a run produced no result, given a done context.
+func ctxNotes(ctx context.Context, timeout Duration) string {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "timed out after " + time.Duration(timeout).String()
+	}
+	return "cancelled"
+}
+
+// runClaudeHeadless runs claude headless in dir with the given prompt.
+// onActivity is called with a kind ("tool" or "text") and description for each
+// agent event (may be nil). Text, tool, and result events are teed to tl
+// (may be nil); the caller writes the run_start event.
+func runClaudeHeadless(ctx context.Context, dir, prompt string, cfg AgentConfig, tl *transcriptLogger, onActivity func(kind, activity string)) (success bool, notes string, err error) {
+	start := time.Now()
+	if debugLog != nil {
+		debugLog.Printf("agent start dir=%s", dir)
+	}
+	defer func() {
+		tl.result(success, notes)
+		if debugLog != nil {
+			debugLog.Printf("agent done dir=%s duration=%s success=%v notes=%q", dir, time.Since(start).Round(time.Millisecond), success, notes)
+		}
+	}()
+
+	if cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(cfg.Timeout))
+		defer cancel()
+	}
+
+	const schema = `{"type":"object","properties":{"status":{"type":"string","enum":["success","failed"]},"notes":{"type":"string"}},"required":["status"]}`
+	cmd := exec.CommandContext(ctx, "claude", claudeArgs(cfg, prompt, schema)...)
 	cmd.Dir = dir
 
 	var stderrBuf bytes.Buffer
@@ -183,7 +319,7 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(
 	}
 	if startErr := cmd.Start(); startErr != nil {
 		if ctx.Err() != nil {
-			return false, "cancelled", nil
+			return false, ctxNotes(ctx, cfg.Timeout), nil
 		}
 		return false, startErr.Error(), nil
 	}
@@ -203,14 +339,12 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(
 		}
 		switch line.Type {
 		case "assistant":
-			if onActivity == nil {
-				break
-			}
 			for _, block := range line.Message.Content {
 				var kind, activity string
 				switch block.Type {
 				case "tool_use":
 					detail := extractToolDetail(block.Name, string(block.Input))
+					tl.tool(block.Name, detail)
 					kind = "tool"
 					activity = block.Name
 					if detail != "" {
@@ -218,11 +352,12 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(
 					}
 				case "text":
 					if block.Text != "" {
+						tl.text(block.Text)
 						kind = "text"
 						activity = block.Text
 					}
 				}
-				if activity != "" {
+				if activity != "" && onActivity != nil {
 					select {
 					case <-ctx.Done():
 					default:
@@ -240,7 +375,7 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, onActivity func(
 	waitErr := cmd.Wait()
 	if !foundResult {
 		if ctx.Err() != nil {
-			return false, "cancelled", nil
+			return false, ctxNotes(ctx, cfg.Timeout), nil
 		}
 		stderr := strings.TrimSpace(stderrBuf.String())
 		if stderr == "" && waitErr != nil {
@@ -338,25 +473,63 @@ func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) 
 	return nil
 }
 
-func runConflictResolver(ctx context.Context, projectRoot, snagID, description string) error {
-	prompt := fmt.Sprintf(
-		"A git merge --squash conflict occurred while merging branch snag/%s. "+
-			"Resolve the conflicts in the working tree, then run: git commit -m \"snag: %s\"",
-		snagID, description,
-	)
-	success, notes, err := runClaudeHeadless(ctx, projectRoot, prompt, nil)
+func headCommitHash(projectRoot string) string {
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = projectRoot
+	out, err := cmd.Output()
 	if err != nil {
-		return err
+		return ""
 	}
-	if !success {
-		return fmt.Errorf("%s", notes)
+	return strings.TrimSpace(string(out))
+}
+
+// mergeStage runs everything after the snag branch is committed: marker
+// deletion, the squash merge, and worktree/branch cleanup. Merge-stage
+// failures remove the worktree but preserve branch snag/<id> so the user can
+// retry the merge agentically.
+func mergeStage(projectRoot, defaultBranch string, snag Snag, notes string, cfg Config) snagDoneMsg {
+	if snag.Source == SourceMarker {
+		if err := DeleteMarker(projectRoot, snag.File, snag.Description, cfg.Marker); err != nil {
+			removeWorktreeOnly(projectRoot, snag.ID)
+			return snagDoneMsg{snagID: snag.ID, success: false, mergeFailed: true,
+				notes: fmt.Sprintf("marker removal failed: %s — branch snag/%s preserved", err, snag.ID)}
+		}
 	}
-	return nil
+
+	mergeErr := squashMerge(projectRoot, snag.ID, snag.Description, notes, defaultBranch)
+	switch {
+	case mergeErr == nil:
+		// merged + committed cleanly
+	case errors.Is(mergeErr, errNothingToMerge):
+		// Claude reported success but produced no net change vs the
+		// default branch. Mark the snag complete with a clear marker.
+		removeWorktree(projectRoot, snag.ID)
+		noteText := "no code changes"
+		if notes != "" {
+			noteText = "no code changes — " + notes
+		}
+		return snagDoneMsg{snagID: snag.ID, success: true, notes: noteText}
+	case errors.Is(mergeErr, errMergeConflict):
+		// Back out the half-done squash merge; the work survives on the branch.
+		resetCmd := exec.Command("git", "reset", "--merge")
+		resetCmd.Dir = projectRoot
+		resetCmd.Run()
+		removeWorktreeOnly(projectRoot, snag.ID)
+		return snagDoneMsg{snagID: snag.ID, success: false, mergeFailed: true,
+			notes: fmt.Sprintf("merge conflict — branch snag/%s preserved", snag.ID)}
+	default:
+		removeWorktreeOnly(projectRoot, snag.ID)
+		return snagDoneMsg{snagID: snag.ID, success: false, mergeFailed: true, notes: mergeErr.Error()}
+	}
+
+	commitHash := headCommitHash(projectRoot)
+	removeWorktree(projectRoot, snag.ID)
+	return snagDoneMsg{snagID: snag.ID, success: true, notes: notes, commitHash: commitHash}
 }
 
 // RunSnag starts the snag pipeline in a goroutine and returns a channel of events.
 // The channel carries snagProgressMsg (activity updates) and a final snagDoneMsg.
-func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) chan tea.Msg {
+func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag, cfg Config) chan tea.Msg {
 	ch := make(chan tea.Msg, 64)
 	go func() {
 		if err := createWorktree(projectRoot, snag.ID, defaultBranch); err != nil {
@@ -373,7 +546,16 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) 
 			}
 		}
 
-		success, notes, err := runClaudeHeadless(ctx, worktreePath(projectRoot, snag.ID), buildPrompt(snag.Description), onActivity)
+		tl := newTranscriptLogger(projectRoot, snag.ID)
+		defer tl.Close()
+		tl.runStart("agent")
+
+		prompt := buildPrompt(snag.Description)
+		if snag.Source == SourceMarker {
+			prompt = buildMarkerPrompt(snag.Description, snag.File, snag.Line, snag.Context)
+		}
+
+		success, notes, err := runClaudeHeadless(ctx, worktreePath(projectRoot, snag.ID), prompt, cfg.Agents.Snag, tl, onActivity)
 		if err != nil {
 			removeWorktree(projectRoot, snag.ID)
 			ch <- snagDoneMsg{snagID: snag.ID, success: false, notes: err.Error()}
@@ -381,9 +563,7 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) 
 		}
 		if !success {
 			if ctx.Err() != nil {
-				removeWorktree(projectRoot, snag.ID)
-				ch <- snagDoneMsg{snagID: snag.ID, success: false, notes: "cancelled"}
-				return
+				notes = "cancelled"
 			}
 			removeWorktree(projectRoot, snag.ID)
 			ch <- snagDoneMsg{snagID: snag.ID, success: false, notes: notes}
@@ -399,61 +579,107 @@ func RunSnag(ctx context.Context, projectRoot, defaultBranch string, snag Snag) 
 		}
 
 		ch <- snagProgressMsg{snagID: snag.ID, activity: "merging"}
-
-		mergeErr := squashMerge(projectRoot, snag.ID, snag.Description, notes, defaultBranch)
-		switch {
-		case mergeErr == nil:
-			// merged + committed cleanly
-		case errors.Is(mergeErr, errNothingToMerge):
-			// Claude reported success but produced no net change vs the
-			// default branch. Mark the snag complete with a clear marker.
-			removeWorktree(projectRoot, snag.ID)
-			noteText := "no code changes"
-			if notes != "" {
-				noteText = "no code changes — " + notes
-			}
-			ch <- snagDoneMsg{snagID: snag.ID, success: true, notes: noteText}
-			return
-		case errors.Is(mergeErr, errMergeConflict):
-			ch <- snagProgressMsg{snagID: snag.ID, activity: "resolving conflicts"}
-			if resolveErr := runConflictResolver(ctx, projectRoot, snag.ID, snag.Description); resolveErr != nil {
-				removeWorktree(projectRoot, snag.ID)
-				ch <- snagDoneMsg{snagID: snag.ID, success: false,
-					notes: fmt.Sprintf("merge conflict unresolved: %s", resolveErr)}
-				return
-			}
-		default:
-			removeWorktree(projectRoot, snag.ID)
-			ch <- snagDoneMsg{snagID: snag.ID, success: false, notes: mergeErr.Error()}
-			return
-		}
-
-		commitHash := ""
-		revCmd := exec.Command("git", "rev-parse", "HEAD")
-		revCmd.Dir = projectRoot
-		if hashOut, err := revCmd.Output(); err == nil {
-			commitHash = strings.TrimSpace(string(hashOut))
-		}
-
-		removeWorktree(projectRoot, snag.ID)
-		ch <- snagDoneMsg{snagID: snag.ID, success: true, notes: notes, commitHash: commitHash}
+		ch <- mergeStage(projectRoot, defaultBranch, snag, notes, cfg)
 	}()
 	return ch
 }
 
-func revertSnag(projectRoot, snagID, description, commitHash string) tea.Cmd {
+// agenticMergeCmd retries a failed merge: a headless claude run in the project
+// root squash-merges the preserved branch snag/<id> and resolves any conflicts.
+func agenticMergeCmd(projectRoot, defaultBranch string, cfg Config, snag Snag) tea.Cmd {
+	return func() tea.Msg {
+		tl := newTranscriptLogger(projectRoot, snag.ID)
+		defer tl.Close()
+		tl.runStart("merge")
+
+		prompt := fmt.Sprintf(
+			"Branch snag/%s holds completed work for the task: %s\n\n"+
+				"Perform `git merge --squash snag/%s` into %s, resolving any conflicts in favor of the task's intent, "+
+				"then commit with: git commit -m %q\n\n"+
+				"Do not commit unrelated local changes.",
+			snag.ID, snag.Description, snag.ID, defaultBranch, "snag: "+snag.Description)
+		if snag.Source == SourceMarker {
+			prompt += fmt.Sprintf(
+				"\n\nIf an inline comment marker `%s: %s` remains at %s, remove it before committing.",
+				cfg.Marker, snag.Description, snag.File)
+		}
+
+		success, notes, err := runClaudeHeadless(context.Background(), projectRoot, prompt, cfg.Agents.Merge, tl, nil)
+		if err != nil {
+			return mergeDoneMsg{snagID: snag.ID, success: false, errMsg: err.Error()}
+		}
+		if !success {
+			return mergeDoneMsg{snagID: snag.ID, success: false, errMsg: notes}
+		}
+		commitHash := headCommitHash(projectRoot)
+		deleteSnagBranch(projectRoot, snag.ID)
+		return mergeDoneMsg{snagID: snag.ID, success: true, commitHash: commitHash}
+	}
+}
+
+// runSummary asks claude for a one-line summary of a marker's request,
+// suitable for display in the snag list.
+func runSummary(ctx context.Context, projectRoot string, cfg AgentConfig, markerText, codeContext string) (string, error) {
+	if cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(cfg.Timeout))
+		defer cancel()
+	}
+
+	prompt := fmt.Sprintf(
+		"A code comment contains a task request. Produce a one-line imperative summary of the request, "+
+			"at most 60 characters. Respond with plain text only: no quotes, no markdown, no explanation.\n\n"+
+			"Request: %s\n\nSurrounding code:\n%s",
+		markerText, codeContext)
+
+	args := []string{"--model", cfg.Model}
+	if cfg.Effort != "" {
+		args = append(args, "--effort", cfg.Effort)
+	}
+	args = append(args,
+		"-p", prompt,
+		"--output-format", "text",
+		"--tools", "",
+		"--setting-sources", "project,local",
+		"--strict-mcp-config",
+		"--mcp-config", `{"mcpServers":{}}`,
+		"--disable-slash-commands",
+		"--exclude-dynamic-system-prompt-sections",
+	)
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Dir = projectRoot
+	out, err := cmd.Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(bytes.TrimSpace(ee.Stderr)) > 0 {
+			return "", fmt.Errorf("summary: %s: %s", err, bytes.TrimSpace(ee.Stderr))
+		}
+		return "", fmt.Errorf("summary: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if l := strings.TrimSpace(line); l != "" {
+			return l, nil
+		}
+	}
+	return "", errors.New("summary: empty output")
+}
+
+func revertSnag(projectRoot, snagID, description, commitHash string, cfg Config) tea.Cmd {
 	return func() tea.Msg {
 		cmd := exec.Command("git", "revert", "--no-edit", commitHash)
 		cmd.Dir = projectRoot
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			if hasUnmergedPaths(projectRoot) {
+				tl := newTranscriptLogger(projectRoot, snagID)
+				defer tl.Close()
+				tl.runStart("merge")
 				prompt := fmt.Sprintf(
 					"A `git revert` conflict occurred while reverting commit %s (snag: %q). "+
 						"Resolve the conflicts in the working tree, then run: git commit --no-edit",
 					commitHash, description,
 				)
-				resolveSuccess, _, resolveErr := runClaudeHeadless(context.Background(), projectRoot, prompt, nil)
+				resolveSuccess, _, resolveErr := runClaudeHeadless(context.Background(), projectRoot, prompt, cfg.Agents.Merge, tl, nil)
 				if resolveErr != nil || !resolveSuccess {
 					exec.Command("git", "-C", projectRoot, "revert", "--abort").Run() //nolint
 					msg := "revert conflict unresolved"
