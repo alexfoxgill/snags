@@ -48,8 +48,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	cfg, err := LoadConfig(projectRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid config: %v\n", err)
+		os.Exit(1)
+	}
+
 	defaultBranch := detectDefaultBranch(projectRoot)
-	m := New(projectRoot, defaultBranch, state, *startPaused)
+	m := New(projectRoot, defaultBranch, state, cfg, *startPaused)
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {

@@ -22,6 +22,11 @@ const (
 	StatusReverted SnagStatus = "reverted"
 )
 
+const (
+	SourceInput  = "input"
+	SourceMarker = "marker"
+)
+
 type Snag struct {
 	ID          string     `yaml:"id"`
 	Description string     `yaml:"description"`
@@ -33,6 +38,11 @@ type Snag struct {
 	Branch      string     `yaml:"branch,omitempty"`
 	Notes       string     `yaml:"notes,omitempty"`
 	CommitHash  string     `yaml:"commit_hash,omitempty"`
+	Source      string     `yaml:"source,omitempty"`
+	File        string     `yaml:"file,omitempty"`
+	Line        int        `yaml:"line,omitempty"`
+	Context     string     `yaml:"context,omitempty"`
+	Summary     string     `yaml:"summary,omitempty"`
 }
 
 type State struct {
@@ -81,8 +91,12 @@ func SaveState(projectRoot string, s State) error {
 	return os.WriteFile(stateFile(projectRoot), data, 0644)
 }
 
+func snagLogFile(projectRoot, snagID string) string {
+	return filepath.Join(snagDir(projectRoot), "logs", snagID+".jsonl")
+}
+
 func EnsureSnagDir(projectRoot string) error {
-	if err := os.MkdirAll(snagDir(projectRoot), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(snagDir(projectRoot), "logs"), 0755); err != nil {
 		return err
 	}
 	gitignorePath := filepath.Join(projectRoot, ".gitignore")

@@ -36,6 +36,7 @@ var (
 
 type Model struct {
 	state                State
+	cfg                  Config
 	cursor               int
 	viewOffset           int
 	focus                focusArea
@@ -63,7 +64,7 @@ func waitForSnagEvent(ch chan tea.Msg) tea.Cmd {
 	}
 }
 
-func New(projectRoot, defaultBranch string, state State, startPaused bool) Model {
+func New(projectRoot, defaultBranch string, state State, cfg Config, startPaused bool) Model {
 	ti := textarea.New()
 	ti.Placeholder = "describe a snag..."
 	ti.ShowLineNumbers = false
@@ -82,6 +83,7 @@ func New(projectRoot, defaultBranch string, state State, startPaused bool) Model
 
 	m := Model{
 		state:               state,
+		cfg:                 cfg,
 		focus:               focusInput,
 		input:               ti,
 		spinner:             sp,
