@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -81,7 +83,10 @@ func LoadConfig(projectRoot string) (Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
-		return Config{}, fmt.Errorf("invalid config: %w", err)
+		if errors.Is(err, io.EOF) {
+			return cfg, nil
+		}
+		return Config{}, err
 	}
 
 	if err := validateConfig(cfg); err != nil {

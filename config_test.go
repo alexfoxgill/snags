@@ -113,6 +113,22 @@ agents:
 	}
 }
 
+func TestLoadConfigEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, "")
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error for empty file: %v", err)
+	}
+	def := DefaultConfig()
+	if cfg.Marker != def.Marker {
+		t.Errorf("marker: got %q want %q", cfg.Marker, def.Marker)
+	}
+	if cfg.Agents.Snag.Model != def.Agents.Snag.Model {
+		t.Errorf("snag model: got %q want %q", cfg.Agents.Snag.Model, def.Agents.Snag.Model)
+	}
+}
+
 func TestLoadConfigMalformedYAML(t *testing.T) {
 	dir := t.TempDir()
 	writeConfig(t, dir, "marker: [unclosed\n")
