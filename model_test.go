@@ -1,6 +1,10 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,8 +19,37 @@ func update(m Model, msg tea.Msg) Model {
 	return next.(Model)
 }
 
+func updateWithCmd(m Model, msg tea.Msg) (Model, tea.Cmd) {
+	next, cmd := m.Update(msg)
+	return next.(Model), cmd
+}
+
+// collectMsgs executes a (possibly batched) command tree and returns every
+// message it produces. Only safe for commands whose side effects are cheap.
+func collectMsgs(cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	if msg == nil {
+		return nil
+	}
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		var out []tea.Msg
+		for _, c := range batch {
+			out = append(out, collectMsgs(c)...)
+		}
+		return out
+	}
+	return []tea.Msg{msg}
+}
+
 func keyMsg(k tea.KeyType) tea.KeyMsg {
 	return tea.KeyMsg{Type: k}
+}
+
+func runeMsg(r rune) tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
 }
 
 // --- Entry field ---
@@ -339,5 +372,507 @@ func TestCompleteSnagsHidden(t *testing.T) {
 		if s.Status == StatusComplete {
 			t.Error("complete snag should not be visible")
 		}
+	}
+}
+
+// --- Marker scan ---
+
+func TestScanDoneEnqueuesMarkers(t *testing.T) {
+	m := newTestModel(nil)
+	m = update(m, scanDoneMsg{markers: []Marker{
+		{File: "a.go", Line: 3, Text: "fix x", Context: "func a() {}"},
+	}})
+
+	if len(m.state.Snags) != 1 {
+		t.Fatalf("expected 1 snag, got %d", len(m.state.Snags))
+	}
+	s := m.state.Snags[0]
+	if s.Status != StatusPending || s.Source != SourceMarker {
+		t.Errorf("expected pending marker snag, got status=%q source=%q", s.Status, s.Source)
+	}
+	if s.Description != "fix x" || s.File != "a.go" || s.Line != 3 || s.Context != "func a() {}" {
+		t.Errorf("marker fields not copied: %+v", s)
+	}
+	if s.ID == "" || s.CreatedAt.IsZero() {
+		t.Error("expected ID and CreatedAt to be set")
+	}
+	if m.notice != "1 marker(s) queued" {
+		t.Errorf("wrong notice: %q", m.notice)
+	}
+}
+
+func TestScanDoneDedupesAgainstLiveMarkerSnags(t *testing.T) {
+	snags := []Snag{
+		{ID: "p", Status: StatusPending, Source: SourceMarker, File: "a.go", Description: "fix a"},
+		{ID: "i", Status: StatusInflight, Source: SourceMarker, File: "b.go", Description: "fix b"},
+		{ID: "f", Status: StatusFailed, Source: SourceMarker, File: "c.go", Description: "fix c"},
+		{ID: "c", Status: StatusComplete, Source: SourceMarker, File: "d.go", Description: "fix d"},
+	}
+	m := newTestModel(snags)
+	m = update(m, scanDoneMsg{markers: []Marker{
+		{File: "a.go", Line: 1, Text: "fix a"},
+		{File: "b.go", Line: 1, Text: "fix b"},
+		{File: "c.go", Line: 1, Text: "fix c"},
+		{File: "d.go", Line: 1, Text: "fix d"}, // complete doesn't block re-pickup
+	}})
+
+	if len(m.state.Snags) != 5 {
+		t.Fatalf("expected 5 snags (4 existing + 1 re-picked), got %d", len(m.state.Snags))
+	}
+	added := m.state.Snags[4]
+	if added.Description != "fix d" || added.Status != StatusPending {
+		t.Errorf("expected new pending snag for fix d, got %+v", added)
+	}
+	if m.notice != "1 marker(s) queued, 3 duplicate(s) skipped" {
+		t.Errorf("wrong notice: %q", m.notice)
+	}
+}
+
+func TestScanDoneDedupesWithinBatch(t *testing.T) {
+	m := newTestModel(nil)
+	m = update(m, scanDoneMsg{markers: []Marker{
+		{File: "a.go", Line: 1, Text: "fix x"},
+		{File: "a.go", Line: 9, Text: "fix x"},
+		{File: "b.go", Line: 2, Text: "fix x"}, // same text, other file: not a dup
+	}})
+
+	if len(m.state.Snags) != 2 {
+		t.Fatalf("expected 2 snags, got %d", len(m.state.Snags))
+	}
+	if m.notice != "2 marker(s) queued, 1 duplicate(s) skipped" {
+		t.Errorf("wrong notice: %q", m.notice)
+	}
+}
+
+func TestScanDoneKicksWorkWhenIdle(t *testing.T) {
+	// Nonexistent project root: executing the spawned commands (saveCmd,
+	// summaryCmd) fails fast without side effects.
+	root := filepath.Join(t.TempDir(), "missing")
+	m := New(root, "main", State{}, DefaultConfig(), false)
+	m, cmd := updateWithCmd(m, scanDoneMsg{markers: []Marker{{File: "a.go", Line: 1, Text: "fix x"}}})
+
+	if m.working {
+		t.Fatal("scanDoneMsg itself should not flip working")
+	}
+	var kicked bool
+	for _, msg := range collectMsgs(cmd) {
+		if _, ok := msg.(startWorkMsg); ok {
+			kicked = true
+		}
+	}
+	if !kicked {
+		t.Error("expected startWorkMsg to be fired when idle")
+	}
+}
+
+func TestScanDoneNoMarkersSetsNotice(t *testing.T) {
+	m := newTestModel(nil)
+	m = update(m, scanDoneMsg{})
+	if m.notice != "no markers found" {
+		t.Errorf("expected 'no markers found', got %q", m.notice)
+	}
+	if m.statusBarStr() != "no markers found" {
+		t.Errorf("status bar should show the notice, got %q", m.statusBarStr())
+	}
+}
+
+func TestScanDoneErrorSetsNotice(t *testing.T) {
+	m := newTestModel(nil)
+	m = update(m, scanDoneMsg{err: errors.New("git grep: boom")})
+	if m.notice != "scan failed: git grep: boom" {
+		t.Errorf("wrong notice: %q", m.notice)
+	}
+	if m.scanning {
+		t.Error("expected scanning cleared")
+	}
+}
+
+func TestNoticeClearedOnKeyPress(t *testing.T) {
+	m := newTestModel(nil)
+	m.notice = "no markers found"
+	m = update(m, keyMsg(tea.KeyUp))
+	if m.notice != "" {
+		t.Errorf("expected notice cleared on key press, got %q", m.notice)
+	}
+}
+
+func TestScanKeyStartsScan(t *testing.T) {
+	m := newTestModel(nil)
+	m, cmd := updateWithCmd(m, keyMsg(tea.KeyCtrlS))
+	if !m.scanning {
+		t.Error("expected scanning=true after ctrl+s")
+	}
+	if cmd == nil {
+		t.Error("expected a scan command")
+	}
+}
+
+func TestScanKeyIgnoredWhileScanning(t *testing.T) {
+	m := newTestModel(nil)
+	m.scanning = true
+	m, cmd := updateWithCmd(m, keyMsg(tea.KeyCtrlS))
+	if cmd != nil {
+		t.Error("expected no command while a scan is in flight")
+	}
+	if !m.scanning {
+		t.Error("scanning flag should be unchanged")
+	}
+}
+
+// --- Summaries ---
+
+func TestSummaryDoneSetsSummary(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusPending, Description: "// long marker text", Source: SourceMarker}}
+	m := newTestModel(snags)
+	m = update(m, summaryDoneMsg{snagID: "abc", summary: "Fix the widget"})
+	if m.state.Snags[0].Summary != "Fix the widget" {
+		t.Errorf("expected summary set, got %q", m.state.Snags[0].Summary)
+	}
+}
+
+func TestSummaryDoneErrorIsSilent(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusPending, Description: "task"}}
+	m := newTestModel(snags)
+	m = update(m, summaryDoneMsg{snagID: "abc", err: errors.New("boom")})
+	if m.state.Snags[0].Summary != "" {
+		t.Errorf("expected no summary on error, got %q", m.state.Snags[0].Summary)
+	}
+	if m.notice != "" {
+		t.Errorf("summary errors should be silent, got notice %q", m.notice)
+	}
+}
+
+func TestDisplayTitleFallsBackToDescription(t *testing.T) {
+	if got := displayTitle(Snag{Description: "desc", Summary: "sum"}); got != "sum" {
+		t.Errorf("expected summary, got %q", got)
+	}
+	if got := displayTitle(Snag{Description: "desc"}); got != "desc" {
+		t.Errorf("expected description fallback, got %q", got)
+	}
+}
+
+func TestSelectedNotesShowsMarkerOrigin(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusPending, Source: SourceMarker, File: "pkg/a.go", Line: 12, Description: "fix"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	if got := m.selectedNotes(); got != "from pkg/a.go:12" {
+		t.Errorf("expected marker origin, got %q", got)
+	}
+}
+
+// --- Agentic merge ---
+
+func TestMergeKeyStartsMerge(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusFailed, Branch: "snag/abc", Description: "task"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	m, cmd := updateWithCmd(m, runeMsg('m'))
+	if m.mergingID != "abc" {
+		t.Errorf("expected mergingID=abc, got %q", m.mergingID)
+	}
+	if cmd == nil {
+		t.Error("expected a merge command")
+	}
+}
+
+func TestMergeKeyIgnoredWhileWorking(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusFailed, Branch: "snag/abc", Description: "task"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	m.working = true
+	m = update(m, runeMsg('m'))
+	if m.mergingID != "" {
+		t.Errorf("merge should be ignored while working, got mergingID=%q", m.mergingID)
+	}
+}
+
+func TestMergeKeyIgnoredWhileAnotherMergeRuns(t *testing.T) {
+	snags := []Snag{
+		{ID: "abc", Status: StatusFailed, Branch: "snag/abc", Description: "task"},
+		{ID: "def", Status: StatusFailed, Branch: "snag/def", Description: "other"},
+	}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 1
+	m.mergingID = "abc"
+	m = update(m, runeMsg('m'))
+	if m.mergingID != "abc" {
+		t.Errorf("second merge should be ignored, got mergingID=%q", m.mergingID)
+	}
+}
+
+func TestMergeKeyIgnoredWithoutBranch(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusFailed, Description: "task"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	m = update(m, runeMsg('m'))
+	if m.mergingID != "" {
+		t.Errorf("merge requires a preserved branch, got mergingID=%q", m.mergingID)
+	}
+}
+
+func TestMergeKeyInInputForwardsToInput(t *testing.T) {
+	m := newTestModel(nil)
+	m = update(m, runeMsg('m'))
+	if m.input.Value() != "m" {
+		t.Errorf("expected 'm' typed into input, got %q", m.input.Value())
+	}
+}
+
+func TestMergeDoneSuccess(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusFailed, Branch: "snag/abc", Description: "task", Notes: "merge conflict"}}
+	m := newTestModel(snags)
+	m.mergingID = "abc"
+	m = update(m, mergeDoneMsg{snagID: "abc", success: true, commitHash: "deadbeef"})
+
+	s := m.state.Snags[0]
+	if s.Status != StatusComplete {
+		t.Errorf("expected complete, got %q", s.Status)
+	}
+	if s.CommitHash != "deadbeef" {
+		t.Errorf("expected commit hash, got %q", s.CommitHash)
+	}
+	if s.Branch != "" {
+		t.Errorf("expected branch cleared, got %q", s.Branch)
+	}
+	if s.Notes != "merge conflict" {
+		t.Errorf("expected notes unchanged, got %q", s.Notes)
+	}
+	if m.mergingID != "" {
+		t.Error("expected mergingID cleared")
+	}
+	if !m.sessionCompletedIDs["abc"] {
+		t.Error("expected snag marked session-completed (stays visible)")
+	}
+}
+
+func TestMergeDoneSuccessFillsEmptyNotes(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusFailed, Branch: "snag/abc", Description: "task"}}
+	m := newTestModel(snags)
+	m.mergingID = "abc"
+	m = update(m, mergeDoneMsg{snagID: "abc", success: true, commitHash: "deadbeef"})
+	if m.state.Snags[0].Notes != "merged by agent" {
+		t.Errorf("expected 'merged by agent', got %q", m.state.Snags[0].Notes)
+	}
+}
+
+func TestMergeDoneFailure(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusFailed, Branch: "snag/abc", Description: "task", Notes: "merge conflict"}}
+	m := newTestModel(snags)
+	m.mergingID = "abc"
+	m = update(m, mergeDoneMsg{snagID: "abc", success: false, errMsg: "agent gave up"})
+
+	s := m.state.Snags[0]
+	if s.Status != StatusFailed {
+		t.Errorf("expected still failed, got %q", s.Status)
+	}
+	if s.Notes != "agent gave up" {
+		t.Errorf("expected notes=errMsg, got %q", s.Notes)
+	}
+	if s.Branch != "snag/abc" {
+		t.Errorf("expected branch kept, got %q", s.Branch)
+	}
+	if m.mergingID != "" {
+		t.Error("expected mergingID cleared")
+	}
+}
+
+func TestStartNextSnagBlockedWhileMerging(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusPending, Description: "task"}}
+	m := newTestModel(snags)
+	m.mergingID = "other"
+	m = update(m, startWorkMsg{})
+	if m.working {
+		t.Error("expected no work start while a merge runs")
+	}
+	if m.state.Snags[0].Status != StatusPending {
+		t.Errorf("snag should stay pending, got %q", m.state.Snags[0].Status)
+	}
+}
+
+func TestRetryIgnoredForMergingSnag(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusFailed, Branch: "snag/abc", Description: "task"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	m.mergingID = "abc"
+	m = update(m, runeMsg('r'))
+	if m.state.Snags[0].Status != StatusFailed || m.state.Snags[0].Branch != "snag/abc" {
+		t.Errorf("retry should be ignored while merging: %+v", m.state.Snags[0])
+	}
+}
+
+func TestStatusBarShowsMergeForFailedWithBranch(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusFailed, Branch: "snag/abc", Description: "task"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	if got := m.statusBarStr(); got != "m agentic merge  r retry" {
+		t.Errorf("wrong status bar: %q", got)
+	}
+	m.state.Snags[0].Branch = ""
+	if got := m.statusBarStr(); got != "r retry" {
+		t.Errorf("wrong status bar without branch: %q", got)
+	}
+}
+
+func TestDeleteFailedSnagWithBranchCleansUpBranch(t *testing.T) {
+	dir := initMergeTestRepo(t)
+	gitRun(t, dir, "branch", "snag/abc")
+	m := New(dir, "master", State{Snags: []Snag{{ID: "abc", Status: StatusFailed, Branch: "snag/abc", Description: "task"}}}, DefaultConfig(), false)
+	m.focus = focusList
+	m.cursor = 0
+	m, cmd := updateWithCmd(m, keyMsg(tea.KeyBackspace))
+
+	if len(m.visibleSnags()) != 0 {
+		t.Fatal("expected snag removed")
+	}
+	collectMsgs(cmd) // runs the best-effort branch deletion
+	if branchExists(dir, "snag/abc") {
+		t.Error("expected preserved branch deleted along with the snag")
+	}
+}
+
+func TestDeleteIgnoredForMergingSnag(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusFailed, Branch: "snag/abc", Description: "task"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	m.mergingID = "abc"
+	m = update(m, keyMsg(tea.KeyBackspace))
+	if len(m.visibleSnags()) != 1 {
+		t.Error("snag being merged should not be deletable")
+	}
+}
+
+// --- Details page ---
+
+func TestEnterOpensDetailsForSelectedSnag(t *testing.T) {
+	snags := []Snag{
+		{ID: "a", Status: StatusPending, Description: "first"},
+		{ID: "b", Status: StatusFailed, Description: "second"},
+	}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 1
+	m = update(m, keyMsg(tea.KeyEnter))
+	if m.mode != viewDetails {
+		t.Fatal("expected details mode after enter")
+	}
+	if m.detailsID != "b" {
+		t.Errorf("expected detailsID=b, got %q", m.detailsID)
+	}
+}
+
+func TestEscClosesDetails(t *testing.T) {
+	snags := []Snag{{ID: "a", Status: StatusPending, Description: "first"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	m = update(m, keyMsg(tea.KeyEnter))
+	m = update(m, keyMsg(tea.KeyEsc))
+	if m.mode != viewList {
+		t.Error("expected esc to close details")
+	}
+	if m.detailsID != "" {
+		t.Errorf("expected detailsID cleared, got %q", m.detailsID)
+	}
+	if m.focus != focusList {
+		t.Error("expected to return to list focus")
+	}
+}
+
+func TestEnterClosesDetails(t *testing.T) {
+	snags := []Snag{{ID: "a", Status: StatusPending, Description: "first"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	m = update(m, keyMsg(tea.KeyEnter))
+	m = update(m, keyMsg(tea.KeyEnter))
+	if m.mode != viewList {
+		t.Error("expected enter to close details")
+	}
+}
+
+func makeTextEvents(n int) []transcriptEvent {
+	events := make([]transcriptEvent, n)
+	for i := range events {
+		events[i] = transcriptEvent{Type: "text", Text: fmt.Sprintf("line %d", i)}
+	}
+	return events
+}
+
+func TestDetailsScrollClamps(t *testing.T) {
+	snags := []Snag{{ID: "a", Status: StatusFailed, Description: "task"}}
+	m := newTestModel(snags)
+	m.height = 10
+	m.width = 40
+	m.focus = focusList
+	m.cursor = 0
+	m = update(m, keyMsg(tea.KeyEnter))
+	m.detailsEvents = makeTextEvents(20)
+
+	maxScroll := m.detailsMaxScroll()
+	if maxScroll <= 0 {
+		t.Fatalf("expected scrollable transcript, maxScroll=%d", maxScroll)
+	}
+	for i := 0; i < 100; i++ {
+		m = update(m, keyMsg(tea.KeyDown))
+	}
+	if m.detailsScroll != maxScroll {
+		t.Errorf("expected scroll clamped at %d, got %d", maxScroll, m.detailsScroll)
+	}
+	for i := 0; i < 100; i++ {
+		m = update(m, keyMsg(tea.KeyUp))
+	}
+	if m.detailsScroll != 0 {
+		t.Errorf("expected scroll clamped at 0, got %d", m.detailsScroll)
+	}
+	m = update(m, keyMsg(tea.KeyPgDown))
+	if m.detailsScroll != min(m.detailsPageSize(), maxScroll) {
+		t.Errorf("expected one page down, got %d", m.detailsScroll)
+	}
+	m = update(m, keyMsg(tea.KeyPgUp))
+	if m.detailsScroll != 0 {
+		t.Errorf("expected back to top after pgup, got %d", m.detailsScroll)
+	}
+}
+
+func TestDetailsViewRendersStatusBar(t *testing.T) {
+	snags := []Snag{{ID: "a", Status: StatusFailed, Description: "task", Notes: "broke"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	m = update(m, keyMsg(tea.KeyEnter))
+	view := m.View()
+	if !strings.Contains(view, "↑↓ scroll  pgup/pgdn page  esc back") {
+		t.Error("details view should show its status bar")
+	}
+	if !strings.Contains(view, "no session log") {
+		t.Error("details view should show 'no session log' when transcript is empty")
+	}
+}
+
+func TestQueueRunsWhileDetailsOpen(t *testing.T) {
+	snags := []Snag{
+		{ID: "a", Status: StatusInflight, Description: "running"},
+		{ID: "b", Status: StatusPending, Description: "queued"},
+	}
+	m := newTestModel(snags)
+	m.working = true
+	m.focus = focusList
+	m.cursor = 1
+	m = update(m, keyMsg(tea.KeyEnter)) // open details on b
+	m = update(m, snagDoneMsg{snagID: "a", success: true, notes: "done"})
+
+	if m.state.Snags[0].Status != StatusComplete {
+		t.Errorf("snagDoneMsg should still apply in details mode, got %q", m.state.Snags[0].Status)
+	}
+	if m.mode != viewDetails {
+		t.Error("details should stay open")
 	}
 }

@@ -3,18 +3,22 @@ package main
 import "github.com/charmbracelet/bubbles/key"
 
 type keyMap struct {
-	Up             key.Binding
-	Down           key.Binding
-	MoveUp         key.Binding
-	MoveDown       key.Binding
-	Delete         key.Binding
-	Enter          key.Binding
-	Escape         key.Binding
-	PauseResume    key.Binding
-	Quit           key.Binding
-	Retry          key.Binding
-	Edit           key.Binding
-	ToggleHistory  key.Binding
+	Up            key.Binding
+	Down          key.Binding
+	MoveUp        key.Binding
+	MoveDown      key.Binding
+	PgUp          key.Binding
+	PgDn          key.Binding
+	Delete        key.Binding
+	Enter         key.Binding
+	Escape        key.Binding
+	PauseResume   key.Binding
+	Quit          key.Binding
+	Retry         key.Binding
+	Edit          key.Binding
+	Merge         key.Binding
+	Scan          key.Binding
+	ToggleHistory key.Binding
 }
 
 var keys = keyMap{
@@ -33,6 +37,14 @@ var keys = keyMap{
 	MoveDown: key.NewBinding(
 		key.WithKeys("alt+down"),
 		key.WithHelp("alt+↓", "move down"),
+	),
+	PgUp: key.NewBinding(
+		key.WithKeys("pgup"),
+		key.WithHelp("pgup", "page up"),
+	),
+	PgDn: key.NewBinding(
+		key.WithKeys("pgdown"),
+		key.WithHelp("pgdn", "page down"),
 	),
 	Delete: key.NewBinding(
 		key.WithKeys("backspace"),
@@ -61,6 +73,14 @@ var keys = keyMap{
 	Edit: key.NewBinding(
 		key.WithKeys("e"),
 		key.WithHelp("e", "edit snag"),
+	),
+	Merge: key.NewBinding(
+		key.WithKeys("m"),
+		key.WithHelp("m", "agentic merge"),
+	),
+	Scan: key.NewBinding(
+		key.WithKeys("ctrl+s"),
+		key.WithHelp("ctrl+s", "scan markers"),
 	),
 	ToggleHistory: key.NewBinding(
 		key.WithKeys("tab"),
