@@ -61,9 +61,11 @@ func DefaultConfig() Config {
 		ExtraArgs: []string{},
 	}
 	c.Agents.Merge = AgentConfig{
-		Model:     "sonnet",
-		Effort:    "medium",
-		Timeout:   Duration(2 * time.Minute),
+		Model:  "sonnet",
+		Effort: "medium",
+		// Conflict resolution needs headroom: the merge agent reads both
+		// sides, edits, and commits.
+		Timeout:   Duration(10 * time.Minute),
 		ExtraArgs: []string{},
 	}
 	return c
@@ -110,6 +112,9 @@ func validateConfig(cfg Config) error {
 	// Empty effort is allowed: it means the --effort flag is omitted and the CLI default applies.
 	valid := map[string]bool{"": true, "low": true, "medium": true, "high": true}
 	for _, a := range agents {
+		if a.ac.Model == "" {
+			return fmt.Errorf("empty model for %s", a.name)
+		}
 		if !valid[a.ac.Effort] {
 			return fmt.Errorf("invalid effort %q for %s: must be one of low, medium, high", a.ac.Effort, a.name)
 		}

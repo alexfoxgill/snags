@@ -7,10 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -121,71 +122,6 @@ func deleteSnagBranch(projectRoot, snagID string) {
 func removeWorktree(projectRoot, snagID string) {
 	removeWorktreeOnly(projectRoot, snagID)
 	deleteSnagBranch(projectRoot, snagID)
-}
-
-// transcriptEvent is one line of a snag's .snags/logs/<id>.jsonl transcript.
-type transcriptEvent struct {
-	Type   string `json:"type"`
-	Label  string `json:"label,omitempty"`
-	Time   string `json:"time,omitempty"`
-	Text   string `json:"text,omitempty"`
-	Name   string `json:"name,omitempty"`
-	Detail string `json:"detail,omitempty"`
-	Status string `json:"status,omitempty"`
-	Notes  string `json:"notes,omitempty"`
-}
-
-// transcriptLogger appends events to a snag's transcript log. All methods are
-// nil-receiver safe and best-effort: logging failures never break a run.
-type transcriptLogger struct {
-	f *os.File
-}
-
-func newTranscriptLogger(projectRoot, snagID string) *transcriptLogger {
-	path := snagLogFile(projectRoot, snagID)
-	os.MkdirAll(filepath.Dir(path), 0755)
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil
-	}
-	return &transcriptLogger{f: f}
-}
-
-func (t *transcriptLogger) write(ev transcriptEvent) {
-	if t == nil || t.f == nil {
-		return
-	}
-	data, err := json.Marshal(ev)
-	if err != nil {
-		return
-	}
-	t.f.Write(append(data, '\n'))
-}
-
-func (t *transcriptLogger) runStart(label string) {
-	t.write(transcriptEvent{Type: "run_start", Label: label, Time: time.Now().Format(time.RFC3339)})
-}
-
-func (t *transcriptLogger) text(text string) {
-	t.write(transcriptEvent{Type: "text", Text: text})
-}
-
-func (t *transcriptLogger) tool(name, detail string) {
-	t.write(transcriptEvent{Type: "tool", Name: name, Detail: detail})
-}
-
-func (t *transcriptLogger) result(success bool, notes string) {
-	status := "failed"
-	if success {
-		status = "success"
-	}
-	t.write(transcriptEvent{Type: "result", Status: status, Notes: notes})
-}
-
-func (t *transcriptLogger) Close() {
-	if t != nil && t.f != nil {
-		t.f.Close()
-	}
 }
 
 func buildPrompt(description string) string {
@@ -309,6 +245,11 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, cfg AgentConfig,
 	const schema = `{"type":"object","properties":{"status":{"type":"string","enum":["success","failed"]},"notes":{"type":"string"}},"required":["status"]}`
 	cmd := exec.CommandContext(ctx, "claude", claudeArgs(cfg, prompt, schema)...)
 	cmd.Dir = dir
+	// Run claude in its own process group and kill the whole group on
+	// timeout/cancel: killing just claude leaves its tool subprocesses alive,
+	// and a child that inherited stdout would keep the scanner below blocked.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
@@ -331,7 +272,7 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, cfg AgentConfig,
 	)
 
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
 	for scanner.Scan() {
 		var line streamLine
 		if json.Unmarshal(scanner.Bytes(), &line) != nil {
@@ -372,12 +313,19 @@ func runClaudeHeadless(ctx context.Context, dir, prompt string, cfg AgentConfig,
 		}
 	}
 
+	scanErr := scanner.Err()
+	// Drain anything left on the pipe (e.g. after a scanner overflow stopped
+	// the loop early) so the child never blocks writing stdout.
+	io.Copy(io.Discard, stdout)
 	waitErr := cmd.Wait()
 	if !foundResult {
 		if ctx.Err() != nil {
 			return false, ctxNotes(ctx, cfg.Timeout), nil
 		}
 		stderr := strings.TrimSpace(stderrBuf.String())
+		if stderr == "" && scanErr != nil {
+			stderr = "reading claude output: " + scanErr.Error()
+		}
 		if stderr == "" && waitErr != nil {
 			stderr = waitErr.Error()
 		}
@@ -468,6 +416,11 @@ func squashMerge(projectRoot, snagID, description, notes, defaultBranch string) 
 	cmd = exec.Command("git", args...)
 	cmd.Dir = projectRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
+		// Back out the staged squash: left in the index it makes every later
+		// merge refuse until the user cleans up by hand.
+		resetCmd := exec.Command("git", "reset", "--merge")
+		resetCmd.Dir = projectRoot
+		resetCmd.Run()
 		return fmt.Errorf("commit: %s: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -511,12 +464,15 @@ func mergeStage(projectRoot, defaultBranch string, snag Snag, notes string, cfg 
 		return snagDoneMsg{snagID: snag.ID, success: true, notes: noteText}
 	case errors.Is(mergeErr, errMergeConflict):
 		// Back out the half-done squash merge; the work survives on the branch.
+		failNotes := fmt.Sprintf("merge conflict — branch snag/%s preserved", snag.ID)
 		resetCmd := exec.Command("git", "reset", "--merge")
 		resetCmd.Dir = projectRoot
-		resetCmd.Run()
+		if out, err := resetCmd.CombinedOutput(); err != nil {
+			failNotes += fmt.Sprintf("; git reset --merge failed (%s: %s) — working tree left mid-conflict",
+				err, strings.TrimSpace(string(out)))
+		}
 		removeWorktreeOnly(projectRoot, snag.ID)
-		return snagDoneMsg{snagID: snag.ID, success: false, mergeFailed: true,
-			notes: fmt.Sprintf("merge conflict — branch snag/%s preserved", snag.ID)}
+		return snagDoneMsg{snagID: snag.ID, success: false, mergeFailed: true, notes: failNotes}
 	default:
 		removeWorktreeOnly(projectRoot, snag.ID)
 		return snagDoneMsg{snagID: snag.ID, success: false, mergeFailed: true, notes: mergeErr.Error()}
@@ -604,16 +560,39 @@ func agenticMergeCmd(projectRoot, defaultBranch string, cfg Config, snag Snag) t
 				cfg.Marker, snag.Description, snag.File)
 		}
 
+		preHead := headCommitHash(projectRoot)
 		success, notes, err := runClaudeHeadless(context.Background(), projectRoot, prompt, cfg.Agents.Merge, tl, nil)
-		if err != nil {
-			return mergeDoneMsg{snagID: snag.ID, success: false, errMsg: err.Error()}
+
+		// Trust git, not the agent's report: the merge is only done if a new
+		// commit actually landed. Branch snag/<id> is the sole copy of the
+		// work, so it is deleted only on a verified merge.
+		newHead := headCommitHash(projectRoot)
+		if err == nil && success && newHead != "" && newHead != preHead {
+			deleteSnagBranch(projectRoot, snag.ID)
+			return mergeDoneMsg{snagID: snag.ID, success: true, commitHash: newHead}
 		}
-		if !success {
-			return mergeDoneMsg{snagID: snag.ID, success: false, errMsg: notes}
+
+		var errMsg string
+		switch {
+		case err != nil:
+			errMsg = err.Error()
+		case !success:
+			errMsg = notes
+		default:
+			errMsg = fmt.Sprintf("merge agent reported success but no commit was created — branch snag/%s preserved", snag.ID)
 		}
-		commitHash := headCommitHash(projectRoot)
-		deleteSnagBranch(projectRoot, snag.ID)
-		return mergeDoneMsg{snagID: snag.ID, success: true, commitHash: commitHash}
+		// Don't leave the repo mid-conflict if the agent gave up or timed out
+		// partway through resolving the merge.
+		if hasUnmergedPaths(projectRoot) {
+			resetCmd := exec.Command("git", "reset", "--merge")
+			resetCmd.Dir = projectRoot
+			if out, resetErr := resetCmd.CombinedOutput(); resetErr != nil {
+				errMsg += fmt.Sprintf(" (git reset --merge failed: %s: %s)", resetErr, strings.TrimSpace(string(out)))
+			} else {
+				errMsg += " (ran git reset --merge to back out the conflicted merge)"
+			}
+		}
+		return mergeDoneMsg{snagID: snag.ID, success: false, errMsg: errMsg}
 	}
 }
 
@@ -646,8 +625,13 @@ func runSummary(ctx context.Context, projectRoot string, cfg AgentConfig, marker
 		"--disable-slash-commands",
 		"--exclude-dynamic-system-prompt-sections",
 	)
+	args = append(args, cfg.ExtraArgs...)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = projectRoot
+	// Same process-group kill as runClaudeHeadless: a timeout must take down
+	// claude's subprocesses too.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
@@ -673,7 +657,7 @@ func revertSnag(projectRoot, snagID, description, commitHash string, cfg Config)
 			if hasUnmergedPaths(projectRoot) {
 				tl := newTranscriptLogger(projectRoot, snagID)
 				defer tl.Close()
-				tl.runStart("merge")
+				tl.runStart("revert")
 				prompt := fmt.Sprintf(
 					"A `git revert` conflict occurred while reverting commit %s (snag: %q). "+
 						"Resolve the conflicts in the working tree, then run: git commit --no-edit",

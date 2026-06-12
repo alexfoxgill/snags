@@ -183,6 +183,21 @@ func TestLoadConfigEmptyMarker(t *testing.T) {
 	}
 }
 
+func TestLoadConfigEmptyModel(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, "agents:\n  merge:\n    model: \"\"\n")
+	_, err := LoadConfig(dir)
+	if err == nil {
+		t.Error("expected error for empty model")
+	}
+}
+
+func TestDefaultConfigMergeTimeout(t *testing.T) {
+	if got := DefaultConfig().Agents.Merge.Timeout; got != Duration(10*time.Minute) {
+		t.Errorf("merge timeout: got %v want 10m", time.Duration(got))
+	}
+}
+
 func TestLoadConfigUnknownNestedKey(t *testing.T) {
 	dir := t.TempDir()
 	writeConfig(t, dir, "agents:\n  snag:\n    modle: x\n")

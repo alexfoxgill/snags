@@ -188,68 +188,6 @@ func TestClaudeArgsExtraArgsLast(t *testing.T) {
 	}
 }
 
-func TestTranscriptLoggerWritesJSONL(t *testing.T) {
-	dir := t.TempDir()
-	tl := newTranscriptLogger(dir, "abc")
-	if tl == nil {
-		t.Fatal("expected logger, got nil")
-	}
-	tl.runStart("agent")
-	tl.text("thinking about it")
-	tl.tool("Bash", "go test ./...")
-	tl.result(true, "all done")
-	tl.Close()
-
-	// A second run appends to the same log.
-	tl2 := newTranscriptLogger(dir, "abc")
-	tl2.runStart("merge")
-	tl2.Close()
-
-	data, err := os.ReadFile(snagLogFile(dir, "abc"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("expected 5 lines, got %d:\n%s", len(lines), data)
-	}
-	var evs []map[string]string
-	for i, line := range lines {
-		var ev map[string]string
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			t.Fatalf("line %d not valid JSON: %v: %s", i, err, line)
-		}
-		evs = append(evs, ev)
-	}
-	if evs[0]["type"] != "run_start" || evs[0]["label"] != "agent" {
-		t.Errorf("bad run_start event: %v", evs[0])
-	}
-	if _, err := time.Parse(time.RFC3339, evs[0]["time"]); err != nil {
-		t.Errorf("run_start time not RFC3339: %v", err)
-	}
-	if evs[1]["type"] != "text" || evs[1]["text"] != "thinking about it" {
-		t.Errorf("bad text event: %v", evs[1])
-	}
-	if evs[2]["type"] != "tool" || evs[2]["name"] != "Bash" || evs[2]["detail"] != "go test ./..." {
-		t.Errorf("bad tool event: %v", evs[2])
-	}
-	if evs[3]["type"] != "result" || evs[3]["status"] != "success" || evs[3]["notes"] != "all done" {
-		t.Errorf("bad result event: %v", evs[3])
-	}
-	if evs[4]["type"] != "run_start" || evs[4]["label"] != "merge" {
-		t.Errorf("bad appended run_start event: %v", evs[4])
-	}
-}
-
-func TestTranscriptLoggerNilSafe(t *testing.T) {
-	var tl *transcriptLogger
-	tl.runStart("agent")
-	tl.text("x")
-	tl.tool("Bash", "ls")
-	tl.result(false, "nope")
-	tl.Close()
-}
-
 func TestBuildMarkerPrompt(t *testing.T) {
 	prompt := buildMarkerPrompt("fix the off-by-one", "pkg/foo.go", 42, "for i := 0; i <= n; i++ {")
 	for _, want := range []string{
@@ -422,5 +360,230 @@ func TestMergeStageSuccess(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(dir, "file.txt"))
 	if err != nil || string(data) != "snag version\n" {
 		t.Errorf("merged content wrong: %q err=%v", data, err)
+	}
+}
+
+func TestMergeStageNothingToMerge(t *testing.T) {
+	dir := initMergeTestRepo(t)
+	snag := Snag{ID: "noop01", Description: "do nothing"}
+	// Branch with no commits beyond master: nothing to squash-merge.
+	if err := createWorktree(dir, snag.ID, "master"); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := mergeStage(dir, "master", snag, "agent notes", DefaultConfig())
+	if !msg.success || msg.mergeFailed {
+		t.Fatalf("expected success, got success=%v mergeFailed=%v notes=%q", msg.success, msg.mergeFailed, msg.notes)
+	}
+	if msg.notes != "no code changes — agent notes" {
+		t.Errorf("unexpected notes: %q", msg.notes)
+	}
+	if msg.commitHash != "" {
+		t.Errorf("expected empty commitHash, got %q", msg.commitHash)
+	}
+	if branchExists(dir, "snag/noop01") {
+		t.Error("branch snag/noop01 not deleted")
+	}
+	if _, err := os.Stat(worktreePath(dir, snag.ID)); !os.IsNotExist(err) {
+		t.Error("worktree still exists")
+	}
+}
+
+func TestMergeStageCommitFailureLeavesIndexClean(t *testing.T) {
+	dir := initMergeTestRepo(t)
+	snag := Snag{ID: "hook01", Description: "change file"}
+	startSnagBranch(t, dir, snag.ID, "snag version\n")
+
+	// A failing pre-commit hook makes the squash succeed but the commit fail.
+	hooks := t.TempDir()
+	if err := os.WriteFile(filepath.Join(hooks, "pre-commit"), []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "config", "core.hooksPath", hooks)
+
+	msg := mergeStage(dir, "master", snag, "", DefaultConfig())
+	if msg.success || !msg.mergeFailed {
+		t.Fatalf("expected merge failure, got success=%v mergeFailed=%v notes=%q", msg.success, msg.mergeFailed, msg.notes)
+	}
+	if !strings.Contains(msg.notes, "commit") {
+		t.Errorf("unexpected notes: %q", msg.notes)
+	}
+	if !branchExists(dir, "snag/hook01") {
+		t.Error("branch snag/hook01 was deleted")
+	}
+	if hasStagedChanges(dir) {
+		t.Error("staged squash left in index after commit failure")
+	}
+	if !workingTreeClean(t, dir) {
+		t.Error("working tree not clean after commit failure")
+	}
+
+	// With the index reset, a later snag's merge must go through.
+	gitRun(t, dir, "config", "--unset", "core.hooksPath")
+	snag2 := Snag{ID: "hook02", Description: "second change"}
+	startSnagBranch(t, dir, snag2.ID, "second version\n")
+	if msg2 := mergeStage(dir, "master", snag2, "", DefaultConfig()); !msg2.success {
+		t.Fatalf("follow-up merge blocked: %q", msg2.notes)
+	}
+}
+
+// The marker-scan design centerpiece: a marker file dirty only by the marker
+// line in the working tree, while the agent branch modifies that same file.
+// DeleteMarker brings the file back to HEAD, so the squash merge proceeds.
+func TestMergeStageMarkerOnlyDirtyFileMerges(t *testing.T) {
+	dir := initMergeTestRepo(t)
+	snag := Snag{ID: "mark01", Description: "change file", Source: SourceMarker, File: "file.txt", Line: 2}
+	startSnagBranch(t, dir, snag.ID, "snag version\n")
+
+	// The marker lives only in the working tree (it was never committed);
+	// file.txt is dirty solely by the marker line.
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("original\n// snag: change file\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := mergeStage(dir, "master", snag, "notes", DefaultConfig())
+	if !msg.success || msg.mergeFailed {
+		t.Fatalf("expected success, got success=%v mergeFailed=%v notes=%q", msg.success, msg.mergeFailed, msg.notes)
+	}
+	if msg.commitHash == "" || msg.commitHash != headCommitHash(dir) {
+		t.Errorf("expected commitHash %q, got %q", headCommitHash(dir), msg.commitHash)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "file.txt"))
+	if err != nil || string(data) != "snag version\n" {
+		t.Errorf("merged content wrong: %q err=%v", data, err)
+	}
+	if branchExists(dir, "snag/mark01") {
+		t.Error("branch snag/mark01 not deleted on success")
+	}
+}
+
+// writeStubClaude installs a fake `claude` on PATH whose body is the given
+// shell script. It runs with cwd set by runClaudeHeadless (the project root).
+func writeStubClaude(t *testing.T, script string) {
+	t.Helper()
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n"+script+"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+const stubSuccessResult = `echo '{"type":"result","structured_output":{"status":"success","notes":"done"}}'`
+
+func TestAgenticMergeCmdNoCommitIsFailure(t *testing.T) {
+	dir := initMergeTestRepo(t)
+	snag := Snag{ID: "agm001", Description: "change file"}
+	startSnagBranch(t, dir, snag.ID, "snag version\n")
+	removeWorktreeOnly(dir, snag.ID) // preserved branch, as after a merge failure
+
+	// Agent claims success without committing anything.
+	writeStubClaude(t, stubSuccessResult)
+	msg, ok := agenticMergeCmd(dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
+	if !ok {
+		t.Fatal("expected mergeDoneMsg")
+	}
+	if msg.success {
+		t.Fatal("expected failure when the agent claims success but HEAD did not advance")
+	}
+	if !strings.Contains(msg.errMsg, "no commit was created") {
+		t.Errorf("unexpected errMsg: %q", msg.errMsg)
+	}
+	if msg.commitHash != "" {
+		t.Errorf("expected empty commitHash, got %q", msg.commitHash)
+	}
+	if !branchExists(dir, "snag/agm001") {
+		t.Error("branch snag/agm001 deleted despite no commit landing")
+	}
+}
+
+func TestAgenticMergeCmdVerifiedCommitSucceeds(t *testing.T) {
+	dir := initMergeTestRepo(t)
+	snag := Snag{ID: "agm002", Description: "change file"}
+	startSnagBranch(t, dir, snag.ID, "snag version\n")
+	removeWorktreeOnly(dir, snag.ID)
+	preHead := headCommitHash(dir)
+
+	writeStubClaude(t,
+		"git merge --squash snag/agm002 >/dev/null 2>&1\n"+
+			"git commit -m 'snag: change file' >/dev/null 2>&1\n"+
+			stubSuccessResult)
+	msg := agenticMergeCmd(dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
+	if !msg.success {
+		t.Fatalf("expected success, got errMsg=%q", msg.errMsg)
+	}
+	if msg.commitHash == "" || msg.commitHash == preHead || msg.commitHash != headCommitHash(dir) {
+		t.Errorf("expected new HEAD as commitHash, got %q (preHead %q)", msg.commitHash, preHead)
+	}
+	if branchExists(dir, "snag/agm002") {
+		t.Error("branch snag/agm002 not deleted after verified merge")
+	}
+}
+
+func TestAgenticMergeCmdFailureResetsConflict(t *testing.T) {
+	dir := initMergeTestRepo(t)
+	snag := Snag{ID: "agm003", Description: "change file"}
+	startSnagBranch(t, dir, snag.ID, "snag version\n")
+	removeWorktreeOnly(dir, snag.ID)
+	// Conflicting commit on master after the branch diverged.
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("master version\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "add", "-A")
+	gitRun(t, dir, "commit", "-m", "conflicting change")
+
+	// Agent starts the merge, hits the conflict, and gives up.
+	writeStubClaude(t,
+		"git merge --squash snag/agm003 >/dev/null 2>&1\n"+
+			`echo '{"type":"result","structured_output":{"status":"failed","notes":"could not resolve"}}'`)
+	msg := agenticMergeCmd(dir, "master", DefaultConfig(), snag)().(mergeDoneMsg)
+	if msg.success {
+		t.Fatal("expected failure")
+	}
+	if !strings.Contains(msg.errMsg, "could not resolve") || !strings.Contains(msg.errMsg, "reset --merge") {
+		t.Errorf("unexpected errMsg: %q", msg.errMsg)
+	}
+	if hasUnmergedPaths(dir) {
+		t.Error("unmerged paths left behind")
+	}
+	if !workingTreeClean(t, dir) {
+		t.Error("working tree left mid-conflict")
+	}
+	if !branchExists(dir, "snag/agm003") {
+		t.Error("branch snag/agm003 must be preserved on failure")
+	}
+}
+
+func TestRunClaudeHeadlessLargeStreamLine(t *testing.T) {
+	// A single ~1MB stream line — over the old 256KB scanner cap.
+	writeStubClaude(t,
+		`printf '{"type":"assistant","message":{"content":[{"type":"text","text":"'`+"\n"+
+			`head -c 1048576 /dev/zero | tr '\0' 'x'`+"\n"+
+			`printf '"}]}}\n'`+"\n"+
+			stubSuccessResult)
+	success, notes, err := runClaudeHeadless(context.Background(), t.TempDir(), "p", AgentConfig{Model: "m"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !success {
+		t.Fatalf("expected success, notes=%q", notes)
+	}
+	if notes != "done" {
+		t.Errorf("unexpected notes: %q", notes)
+	}
+}
+
+func TestRunClaudeHeadlessScannerErrorSurfaced(t *testing.T) {
+	// A single >4MB line overflows the scanner; with no result, the scanner
+	// error must surface in notes instead of "no result from claude".
+	writeStubClaude(t, `head -c 5242880 /dev/zero | tr '\0' 'x'; echo`)
+	success, notes, err := runClaudeHeadless(context.Background(), t.TempDir(), "p", AgentConfig{Model: "m"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if success {
+		t.Fatal("expected failure")
+	}
+	if !strings.Contains(notes, "token too long") {
+		t.Errorf("expected scanner error in notes, got %q", notes)
 	}
 }

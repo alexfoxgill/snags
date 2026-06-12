@@ -224,6 +224,45 @@ func TestSnagDoneMsgFailure(t *testing.T) {
 	}
 }
 
+func TestSnagDoneMsgSuccessClearsBranch(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusInflight, Description: "the task", Branch: "snag/abc"}}
+	m := newTestModel(snags)
+	m.working = true
+	m = update(m, snagDoneMsg{snagID: "abc", success: true, commitHash: "deadbeef"})
+
+	if m.state.Snags[0].Branch != "" {
+		t.Errorf("expected branch cleared on success (it was deleted), got %q", m.state.Snags[0].Branch)
+	}
+	if m.state.Snags[0].CommitHash != "deadbeef" {
+		t.Errorf("expected commit hash recorded, got %q", m.state.Snags[0].CommitHash)
+	}
+}
+
+func TestSnagDoneMsgMergeFailedSetsBranch(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusInflight, Description: "the task"}}
+	m := newTestModel(snags)
+	m.working = true
+	m = update(m, snagDoneMsg{snagID: "abc", success: false, mergeFailed: true, notes: "merge conflict — branch snag/abc preserved"})
+
+	if m.state.Snags[0].Status != StatusFailed {
+		t.Errorf("expected failed, got %q", m.state.Snags[0].Status)
+	}
+	if m.state.Snags[0].Branch != "snag/abc" {
+		t.Errorf("expected preserved branch recorded, got %q", m.state.Snags[0].Branch)
+	}
+}
+
+func TestSnagDoneMsgPlainFailureClearsBranch(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusInflight, Description: "the task", Branch: "snag/abc"}}
+	m := newTestModel(snags)
+	m.working = true
+	m = update(m, snagDoneMsg{snagID: "abc", success: false, notes: "agent failed"})
+
+	if m.state.Snags[0].Branch != "" {
+		t.Errorf("expected branch cleared on non-merge failure, got %q", m.state.Snags[0].Branch)
+	}
+}
+
 // --- Retry ---
 
 func TestRetryFailedSnag(t *testing.T) {
@@ -247,6 +286,18 @@ func TestRetryFailedSnag(t *testing.T) {
 	}
 	if found.Notes != "" {
 		t.Errorf("expected notes cleared after retry, got %q", found.Notes)
+	}
+}
+
+func TestRetryClearsBranch(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusFailed, Description: "the task", Branch: "snag/abc", Notes: "merge conflict"}}
+	m := newTestModel(snags)
+	m.focus = focusList
+	m.cursor = 0
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+
+	if m.state.Snags[0].Branch != "" {
+		t.Errorf("expected branch cleared on retry (rerun deletes it), got %q", m.state.Snags[0].Branch)
 	}
 }
 

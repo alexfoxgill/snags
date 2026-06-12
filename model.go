@@ -170,7 +170,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.state.Snags[i].ID == msg.snagID {
 				if msg.success {
 					m.state.Snags[i].Status = StatusComplete
-					m.state.Snags[i].Branch = "snag/" + msg.snagID
+					// The branch is deleted on a successful merge.
+					m.state.Snags[i].Branch = ""
 					m.state.Snags[i].CommitHash = msg.commitHash
 					m.sessionCompletedIDs[msg.snagID] = true
 					if debugLog != nil {
@@ -178,6 +179,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				} else {
 					m.state.Snags[i].Status = StatusFailed
+					if msg.mergeFailed {
+						// Merge-stage failure: the work survives on this branch.
+						m.state.Snags[i].Branch = "snag/" + msg.snagID
+					} else {
+						m.state.Snags[i].Branch = ""
+					}
 					if debugLog != nil {
 						debugLog.Printf("state change snag=%s inflight → failed notes=%q", msg.snagID, msg.notes)
 					}
@@ -370,6 +377,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if m.state.Snags[i].ID == id {
 							m.state.Snags[i].Status = StatusPending
 							m.state.Snags[i].Notes = ""
+							// A rerun recreates the worktree, whose defensive
+							// cleanup deletes any preserved branch.
+							m.state.Snags[i].Branch = ""
 							if debugLog != nil {
 								debugLog.Printf("state change snag=%s failed → pending (retry)", id)
 							}
