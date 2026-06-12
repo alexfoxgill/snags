@@ -29,6 +29,10 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+func (d Duration) MarshalYAML() (interface{}, error) {
+	return time.Duration(d).String(), nil
+}
+
 type AgentConfig struct {
 	Model     string   `yaml:"model"`
 	Effort    string   `yaml:"effort"`
@@ -95,6 +99,28 @@ func LoadConfig(projectRoot string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// printConfig writes the effective config for the repo to stdout: the
+// contents of .snags/config.yaml merged over defaults, or pure defaults
+// if the file is absent.
+func printConfig(projectRoot string) error {
+	cfg, err := LoadConfig(projectRoot)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(projectRoot, ".snags", "config.yaml")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		fmt.Printf("# defaults (no %s)\n", path)
+	} else {
+		fmt.Printf("# %s (merged with defaults)\n", path)
+	}
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write(out)
+	return err
 }
 
 func validateConfig(cfg Config) error {

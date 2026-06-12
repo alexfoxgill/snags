@@ -26,6 +26,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	if flag.Arg(0) == "config" {
+		if err := printConfig(projectRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if _, err := exec.LookPath("claude"); err != nil {
 		fmt.Fprintf(os.Stderr, "error: 'claude' not found in PATH — install Claude Code to use snags\n")
 		os.Exit(1)
