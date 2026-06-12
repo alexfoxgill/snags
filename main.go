@@ -27,6 +27,13 @@ func main() {
 	}
 
 	if flag.Arg(0) == "config" {
+		if flag.Arg(1) == "--init" || flag.Arg(1) == "init" {
+			if err := initConfig(projectRoot); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if err := printConfig(projectRoot); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)

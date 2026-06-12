@@ -123,6 +123,29 @@ func printConfig(projectRoot string) error {
 	return err
 }
 
+// initConfig writes the default config to .snags/config.yaml. It refuses
+// to overwrite an existing file.
+func initConfig(projectRoot string) error {
+	if err := EnsureSnagDir(projectRoot); err != nil {
+		return err
+	}
+	path := filepath.Join(projectRoot, ".snags", "config.yaml")
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists", path)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	out, err := yaml.Marshal(DefaultConfig())
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		return err
+	}
+	fmt.Printf("wrote %s\n", path)
+	return nil
+}
+
 func validateConfig(cfg Config) error {
 	if cfg.Marker == "" {
 		return fmt.Errorf("marker keyword must not be empty")
