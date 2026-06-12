@@ -74,6 +74,21 @@ func styledWrap(style lipgloss.Style, s string, width int) []string {
 	return lines
 }
 
+// agentConfigLine formats an AgentConfig for the details metadata.
+func agentConfigLine(ac AgentConfig) string {
+	parts := []string{ac.Model}
+	if ac.Effort != "" {
+		parts = append(parts, "effort "+ac.Effort)
+	}
+	if ac.Timeout != 0 {
+		parts = append(parts, "timeout "+time.Duration(ac.Timeout).String())
+	}
+	if len(ac.ExtraArgs) > 0 {
+		parts = append(parts, "args "+strings.Join(ac.ExtraArgs, " "))
+	}
+	return strings.Join(parts, " · ")
+}
+
 func (m Model) detailsHeaderLines(s Snag) []string {
 	var lines []string
 	title := displayTitle(s)
@@ -93,6 +108,7 @@ func (m Model) detailsHeaderLines(s Snag) []string {
 	if s.Source == SourceMarker {
 		meta = append(meta, fmt.Sprintf("marker %s:%d", s.File, s.Line))
 	}
+	meta = append(meta, "agent "+agentConfigLine(m.cfg.Agents.Snag))
 	meta = append(meta, "created "+s.CreatedAt.Format("2006-01-02 15:04:05"))
 	if s.CommitHash != "" {
 		meta = append(meta, "commit "+s.CommitHash)
