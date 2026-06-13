@@ -37,4 +37,4 @@ The app is a single Go package (`main`) with ten files:
 - Git worktrees live at `.snags/worktrees/<snagID>`. They are created fresh per run and removed after success or failure. Orphan cleanup runs defensively at worktree creation time.
 - Claude is invoked with a JSON schema enforcing the `{status, notes}` output shape.
 - `Ctrl+S` scans the working tree for `// snag: ...` style markers via `git grep`, deduplicated against existing snags. Each new marker becomes a pending snag; a summary agent produces a short display title. On successful merge the marker is deleted from the working tree before committing.
-- Merge failures preserve `snag/<id>`. Pressing `m` on a failed snag with a preserved branch runs `agenticMergeCmd`, a headless Claude in the project root that performs the squash merge and resolves any conflicts.
+- Merge failures preserve `snag/<id>`. Marker snags automatically run `agenticMergeCmd` on merge failure; for typed snags the user triggers it by pressing `m` on a failed snag with a preserved branch. `agenticMergeCmd` is a headless Claude in the project root that performs the squash merge and resolves any conflicts.

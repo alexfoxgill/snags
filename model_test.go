@@ -286,6 +286,37 @@ func TestSnagDoneMsgMergeFailedSetsBranch(t *testing.T) {
 	}
 }
 
+func TestSnagDoneMsgMergeFailedMarkerAutoMerges(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusInflight, Description: "the task", Source: SourceMarker, File: "main.go"}}
+	m := newTestModel(snags)
+	m.working = true
+	m = update(m, snagDoneMsg{snagID: "abc", success: false, mergeFailed: true, notes: "merge conflict — branch snag/abc preserved"})
+
+	if m.state.Snags[0].Status != StatusFailed {
+		t.Errorf("expected failed, got %q", m.state.Snags[0].Status)
+	}
+	if m.state.Snags[0].Branch != "snag/abc" {
+		t.Errorf("expected preserved branch recorded, got %q", m.state.Snags[0].Branch)
+	}
+	if m.mergingID != "abc" {
+		t.Errorf("expected marker snag to auto-start agentic merge, mergingID=%q", m.mergingID)
+	}
+	if m.cancelMerge == nil {
+		t.Error("expected cancelMerge to be set for auto merge")
+	}
+}
+
+func TestSnagDoneMsgMergeFailedTypedDoesNotAutoMerge(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusInflight, Description: "the task", Source: SourceInput}}
+	m := newTestModel(snags)
+	m.working = true
+	m = update(m, snagDoneMsg{snagID: "abc", success: false, mergeFailed: true, notes: "merge conflict"})
+
+	if m.mergingID != "" {
+		t.Errorf("expected typed snag not to auto-merge, mergingID=%q", m.mergingID)
+	}
+}
+
 func TestSnagDoneMsgPlainFailureClearsBranch(t *testing.T) {
 	snags := []Snag{{ID: "abc", Status: StatusInflight, Description: "the task", Branch: "snag/abc"}}
 	m := newTestModel(snags)

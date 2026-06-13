@@ -54,7 +54,7 @@ Type a task description and press **Enter** to add it to the queue. Snags are pr
 2. When processing starts, Claude Code runs in a fresh worktree at `.snags/worktrees/<id>` on branch `snag/<id>`.
 3. On success, the worktree is squash-merged back and removed. Typed snags merge to your default branch; marker snags merge to the branch you were on when the snag ran.
 4. On failure, the snag is marked failed and can be retried with `r`.
-5. Merge conflicts preserve branch `snag/<id>`. Press `m` to run an agentic merge that resolves them.
+5. Merge conflicts preserve branch `snag/<id>`. Marker snags retry the merge agentically on their own; for typed snags, press `m` to run an agentic merge that resolves them.
 
 ## Inline markers
 

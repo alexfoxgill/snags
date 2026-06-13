@@ -205,6 +205,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentText = ""
 		m.streamCh = nil
 		m.inflightStart = time.Time{}
+		var failedMarker *Snag
 		for i := range m.state.Snags {
 			if m.state.Snags[i].ID == msg.snagID {
 				if msg.success {
@@ -221,6 +222,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if msg.mergeFailed {
 						// Merge-stage failure: the work survives on this branch.
 						m.state.Snags[i].Branch = "snag/" + msg.snagID
+						// Marker snags always retry the merge agentically rather
+						// than waiting for the user to press `m`.
+						if m.state.Snags[i].Source == SourceMarker {
+							failedMarker = &m.state.Snags[i]
+						}
 					} else {
 						m.state.Snags[i].Branch = ""
 					}
@@ -239,9 +245,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == viewDetails && msg.snagID == m.detailsID {
 			m.refreshDetails()
 		}
-		var workCmd tea.Cmd
-		m, workCmd = m.startNextSnag()
-		cmds = append(cmds, saveCmd(m.projectRoot, m.state), workCmd)
+		if failedMarker != nil && m.mergingID == "" {
+			// Auto-retry the merge for marker snags. mergeDoneMsg picks up the
+			// next snag, so don't also start it here (which would run the merge
+			// agent and a worktree run concurrently).
+			m.mergingID = failedMarker.ID
+			if debugLog != nil {
+				debugLog.Printf("agentic merge started snag=%s branch=%s (auto, marker)", failedMarker.ID, failedMarker.Branch)
+			}
+			// Cancellable so quit() can kill the merge agent rather than
+			// orphaning it to commit after the app exits.
+			ctx, cancel := context.WithCancel(context.Background())
+			m.cancelMerge = cancel
+			cmds = append(cmds, saveCmd(m.projectRoot, m.state), agenticMergeCmd(ctx, m.projectRoot, m.defaultBranch, m.cfg, *failedMarker))
+		} else {
+			var workCmd tea.Cmd
+			m, workCmd = m.startNextSnag()
+			cmds = append(cmds, saveCmd(m.projectRoot, m.state), workCmd)
+		}
 
 	case scanDoneMsg:
 		m.scanning = false
