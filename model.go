@@ -79,6 +79,7 @@ type Model struct {
 	confirmingRevert    bool
 	notice              string
 	scanning            bool
+	scanStart           time.Time
 	mergingID           string
 	mode                viewMode
 	detailsID           string
@@ -244,6 +245,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case scanDoneMsg:
 		m.scanning = false
+		m.scanStart = time.Time{}
 		if msg.err != nil {
 			m.notice = "scan failed: " + msg.err.Error()
 			break
@@ -589,6 +591,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Scan):
 			if !m.scanning {
 				m.scanning = true
+				m.scanStart = time.Now()
 				cmds = append(cmds, scanCmd(m.projectRoot, m.cfg.Marker))
 			}
 
@@ -860,7 +863,7 @@ func (m Model) View() string {
 
 	// Snag list
 	visible := m.visibleSnags()
-	if len(visible) == 0 {
+	if len(visible) == 0 && !m.scanning {
 		sb.WriteString(faintStyle.Render("  no snags") + "\n")
 	} else {
 		end := m.viewOffset + maxVisible
@@ -878,6 +881,9 @@ func (m Model) View() string {
 			sb.WriteString("  ...\n")
 		}
 	}
+	if m.scanning {
+		sb.WriteString(m.renderScanRow() + "\n")
+	}
 
 	sb.WriteString(strings.Repeat("─", m.width) + "\n")
 	sb.WriteString("> " + m.input.View() + "\n")
@@ -892,6 +898,18 @@ func (m Model) View() string {
 	sb.WriteString(faintStyle.Render(m.statusBarStr()) + "\n")
 
 	return sb.String()
+}
+
+// renderScanRow is the placeholder list row shown while a marker scan is in
+// flight: a spinner, placeholder name, and a running timer, so initiating a
+// scan gives immediate visual feedback before any markers are enqueued.
+func (m Model) renderScanRow() string {
+	line := fmt.Sprintf("    %s scanning for markers...", m.spinner.View())
+	if !m.scanStart.IsZero() {
+		elapsed := time.Since(m.scanStart).Round(time.Second).String()
+		line += faintStyle.Render("  " + elapsed)
+	}
+	return inflightStyle.Render(line)
 }
 
 func (m Model) renderRow(s Snag, pos int, selected bool) string {
