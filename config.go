@@ -53,7 +53,7 @@ func DefaultConfig() Config {
 	var c Config
 	c.Marker = "snag"
 	c.Agents.Snag = AgentConfig{
-		Model:     "fable",
+		Model:     "opus",
 		Effort:    "low",
 		Timeout:   Duration(15 * time.Minute),
 		ExtraArgs: []string{},
