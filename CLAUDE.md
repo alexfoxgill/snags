@@ -6,13 +6,13 @@ Each snag is executed by spawning `claude` CLI in headless mode inside an isolat
 
 ## Architecture
 
-The app is a single Go package (`main`) with ten files:
+The app is a single Go package (`main`) with eleven files:
 
 **`main.go`** — entry point. Validates prerequisites (git repo, `claude` in PATH), loads state, then hands off to BubbleTea.
 
 **`model.go`** — BubbleTea `Model`. Owns all TUI state: snag list, cursor/scroll position, text input, spinner, and the `cancelWork` context cancel func. On `startWorkMsg`, calls `startNextSnag()` which picks the first `pending` snag, flips it to `inflight`, creates a `RunSnag` goroutine, and listens on its channel via `waitForSnagEvent`. Progress arrives as `snagProgressMsg`; completion as `snagDoneMsg`. On done, the model saves state and immediately tries the next snag. Newly scanned marker snags trigger a `summaryCmd` (haiku agent) that produces a short display title.
 
-**`worker.go`** — snag execution pipeline. `RunSnag` creates a git worktree at `.snags/worktrees/<id>` on a branch `snag/<id>` off the snag's base branch (`baseBranchFor`: current branch for marker snags, detected default branch otherwise), invokes `claude` with `--output-format stream-json --permission-mode auto`, parses the NDJSON stream to extract tool-call activity (for the status bar) and the final structured-output result (`{"status":"success"|"failed","notes":"..."}`). On success, calls `mergeStage`: deletes the inline marker from the working tree (marker snags only), then squash-merges the branch. On merge conflict the worktree is removed but `snag/<id>` is preserved; the user triggers an agentic merge with `m`. `agenticMergeCmd` runs a headless Claude in the project root to perform the merge and resolve conflicts; it only deletes the branch once a snag commit is verified on HEAD.
+**`worker.go`** — snag execution pipeline. `RunSnag` creates a git worktree at `.snags/worktrees/<id>` on a branch `snag/<id>` off the snag's base branch (`baseBranchFor`: current branch for marker snags, detected default branch otherwise), invokes `claude` with `--output-format stream-json --permission-mode auto`, parses the NDJSON stream to extract tool-call activity (for the status bar) and the final structured-output result (`{"status":"success"|"failed","notes":"..."}`). On success, marker snags land via a per-file 3-way apply (`applyMarkerMergeStage` in `apply.go`): it commits the branch's touched paths onto the base branch through a throwaway index (never touching the live tree), then `git merge-file`s each touched path into the live working tree, after deleting the marker. Non-overlapping user edits and other pending markers merge silently; a true same-line overlap lands the commit but leaves conflict markers in the file and preserves `snag/<id>` for manual resolution. Typed snags still squash-merge (`squashMerge`) and run the agentic merge on conflict: on conflict the worktree is removed but `snag/<id>` is preserved and the user triggers an agentic merge with `m`. `agenticMergeCmd` runs a headless Claude in the project root to perform the merge and resolve conflicts; it only deletes the branch once a snag commit is verified on HEAD.
 
 **`state.go`** — persistence. `State` (containing `[]Snag`) is marshalled to `.snags/state.yaml`. `LoadState` resets any `inflight` snags to `pending` on startup (crash recovery). `EnsureSnagDir` also appends `.snags/` to `.gitignore`.
 
@@ -26,6 +26,8 @@ The app is a single Go package (`main`) with ten files:
 
 **`keys.go`** — BubbleTea key bindings. All keybindings are centralised here.
 
+**`apply.go`** — marker-snag landing: commits the branch's touched paths via a throwaway index, then 3-way merges each into the live working tree with `git merge-file` (ported from the `inker` project's applier).
+
 **`debug.go`** — `--debug` support: opens `.snags/debug.log` and exposes the package-level `debugLog` logger (nil when disabled).
 
 ## App Functionality
@@ -37,4 +39,4 @@ The app is a single Go package (`main`) with ten files:
 - Git worktrees live at `.snags/worktrees/<snagID>`. They are created fresh per run and removed after success or failure. Orphan cleanup runs defensively at worktree creation time.
 - Claude is invoked with a JSON schema enforcing the `{status, notes}` output shape.
 - `Ctrl+S` scans the working tree for `// snag: ...` style markers via `git grep`, deduplicated against existing snags. Each new marker becomes a pending snag; a summary agent produces a short display title. On successful merge the marker is deleted from the working tree before committing.
-- Merge failures preserve `snag/<id>`. Marker snags automatically run `agenticMergeCmd` on merge failure; for typed snags the user triggers it by pressing `m` on a failed snag with a preserved branch. `agenticMergeCmd` is a headless Claude in the project root that performs the squash merge and resolves any conflicts.
+- Marker snags land via a per-file 3-way apply into the live working tree; non-overlapping edits merge silently, while a true same-line overlap leaves conflict markers in the file and preserves `snag/<id>` for manual resolution. Typed-snag merge failures preserve `snag/<id>`; the user triggers an agentic merge by pressing `m` on a failed snag with a preserved branch. `agenticMergeCmd` is a headless Claude in the project root that performs the squash merge and resolves any conflicts.
