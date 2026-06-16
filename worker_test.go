@@ -876,3 +876,70 @@ func TestRunClaudeHeadlessScannerErrorSurfaced(t *testing.T) {
 		t.Errorf("expected scanner error in notes, got %q", notes)
 	}
 }
+
+// A marker snag merges even when the live tree is dirty with an UNRELATED
+// uncommitted change in the same file (the case git merge --squash aborts on).
+func TestMergeStageMarkerMergesOverDirtyTree(t *testing.T) {
+	dir := initMergeTestRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"),
+		[]byte("top\nmiddle\nbottom\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "commit", "-am", "multiline")
+
+	snag := Snag{ID: "mk1", Description: "tweak bottom", Source: SourceMarker, File: "file.txt", Line: 3}
+	startSnagBranch(t, dir, snag.ID, "top\nmiddle\nbottom EDITED\n")
+
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"),
+		[]byte("top WIP\nmiddle\n// snag: tweak bottom\nbottom\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := mergeStage(dir, "master", snag, "notes", DefaultConfig(), nil)
+	if !msg.success || msg.mergeFailed || msg.conflict {
+		t.Fatalf("expected clean success, got success=%v mergeFailed=%v conflict=%v notes=%q",
+			msg.success, msg.mergeFailed, msg.conflict, msg.notes)
+	}
+	if msg.commitHash == "" || msg.commitHash != headCommitHash(dir) {
+		t.Errorf("commitHash %q != HEAD %q", msg.commitHash, headCommitHash(dir))
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "file.txt"))
+	want := "top WIP\nmiddle\nbottom EDITED\n"
+	if string(got) != want {
+		t.Errorf("live tree = %q, want %q", got, want)
+	}
+	if branchExists(dir, "snag/mk1") {
+		t.Error("branch should be deleted on full success")
+	}
+}
+
+// A true same-line overlap lands the commit, leaves markers, preserves branch.
+func TestMergeStageMarkerConflictLeavesMarkersAndKeepsBranch(t *testing.T) {
+	dir := initMergeTestRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("shared\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "commit", "-am", "base")
+
+	snag := Snag{ID: "mk2", Description: "change shared", Source: SourceMarker, File: "file.txt", Line: 1}
+	startSnagBranch(t, dir, snag.ID, "shared AGENT\n")
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("shared WIP\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := mergeStage(dir, "master", snag, "notes", DefaultConfig(), nil)
+	if !msg.success || !msg.conflict || msg.mergeFailed {
+		t.Fatalf("expected success+conflict, got success=%v conflict=%v mergeFailed=%v notes=%q",
+			msg.success, msg.conflict, msg.mergeFailed, msg.notes)
+	}
+	if msg.commitHash == "" {
+		t.Error("expected snag commit to have landed")
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "file.txt"))
+	if !strings.Contains(string(got), "<<<<<<<") {
+		t.Errorf("expected conflict markers in live tree, got %q", got)
+	}
+	if !branchExists(dir, "snag/mk2") {
+		t.Error("branch should be preserved on conflict")
+	}
+}

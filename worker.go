@@ -34,6 +34,10 @@ type snagDoneMsg struct {
 	// mergeFailed marks a merge-stage failure: the agent's work is intact on
 	// branch snag/<id>, only merging it back failed.
 	mergeFailed bool
+	// conflict marks a successful merge whose live-tree update left conflict
+	// markers (or held-back files). The snag commit landed; branch snag/<id>
+	// is preserved for manual resolution.
+	conflict bool
 }
 
 type revertDoneMsg struct {
@@ -532,11 +536,7 @@ func mergeStage(projectRoot, baseBranch string, snag Snag, notes string, cfg Con
 	}()
 
 	if snag.Source == SourceMarker {
-		if err := DeleteMarker(projectRoot, snag.File, snag.Description, cfg.Marker); err != nil {
-			removeWorktreeOnly(projectRoot, snag.ID)
-			return snagDoneMsg{snagID: snag.ID, success: false, mergeFailed: true,
-				notes: fmt.Sprintf("marker removal failed: %s — branch snag/%s preserved", err, snag.ID)}
-		}
+		return applyMarkerMergeStage(projectRoot, baseBranch, snag, notes, cfg)
 	}
 
 	mergeErr := squashMerge(projectRoot, snag.ID, snag.Description, notes, baseBranch)

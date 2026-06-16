@@ -291,3 +291,78 @@ func mergeFileInPlace(dir, full string, base, theirs []byte) (bool, error) {
 	}
 	return false, nil
 }
+
+// applyMarkerMergeStage lands a completed marker snag without git merge --squash:
+// it commits the branch's touched paths onto baseBranch via a temp index, then
+// 3-way merges each touched path into the live working tree. The marker comment
+// is deleted from the live tree first so its file matches base (the agent's code
+// change then applies as a clean overwrite rather than a phantom conflict).
+func applyMarkerMergeStage(projectRoot, baseBranch string, snag Snag, notes string, cfg Config) snagDoneMsg {
+	if err := requireBaseBranch(projectRoot, baseBranch, "merging"); err != nil {
+		removeWorktreeOnly(projectRoot, snag.ID)
+		return snagDoneMsg{snagID: snag.ID, success: false, mergeFailed: true,
+			notes: fmt.Sprintf("%s — branch snag/%s preserved", err, snag.ID)}
+	}
+	branch := "snag/" + snag.ID
+	base, err := mergeBaseRev(projectRoot, baseBranch, branch)
+	if err != nil {
+		removeWorktreeOnly(projectRoot, snag.ID)
+		return snagDoneMsg{snagID: snag.ID, success: false, mergeFailed: true,
+			notes: fmt.Sprintf("merge-base: %s — branch snag/%s preserved", err, snag.ID)}
+	}
+	touched, err := changedPaths(projectRoot, base, branch)
+	if err != nil {
+		removeWorktreeOnly(projectRoot, snag.ID)
+		return snagDoneMsg{snagID: snag.ID, success: false, mergeFailed: true,
+			notes: fmt.Sprintf("diff: %s — branch snag/%s preserved", err, snag.ID)}
+	}
+	if len(touched) == 0 {
+		removeWorktree(projectRoot, snag.ID)
+		noteText := "no code changes"
+		if notes != "" {
+			noteText = "no code changes — " + notes
+		}
+		return snagDoneMsg{snagID: snag.ID, success: true, notes: noteText}
+	}
+
+	// Delete the marker from the live tree first so the marker file matches
+	// base and the agent's edit merges cleanly.
+	if err := DeleteMarker(projectRoot, snag.File, snag.Description, cfg.Marker); err != nil {
+		removeWorktreeOnly(projectRoot, snag.ID)
+		return snagDoneMsg{snagID: snag.ID, success: false, mergeFailed: true,
+			notes: fmt.Sprintf("marker removal failed: %s — branch snag/%s preserved", err, snag.ID)}
+	}
+
+	commitHash, err := commitTouchedPaths(projectRoot, touched, branch, baseBranch, "snag: "+snag.Description, notes)
+	if err != nil {
+		removeWorktreeOnly(projectRoot, snag.ID)
+		return snagDoneMsg{snagID: snag.ID, success: false, mergeFailed: true,
+			notes: fmt.Sprintf("commit: %s — branch snag/%s preserved", err, snag.ID)}
+	}
+
+	// The commit has landed; from here the snag is complete regardless of how
+	// the live-tree update fares.
+	conflicts, mergeErr := mergeLive(projectRoot, base, branch, touched)
+	if mergeErr != nil {
+		removeWorktreeOnly(projectRoot, snag.ID) // keep branch for recovery
+		return snagDoneMsg{snagID: snag.ID, success: true, conflict: true, commitHash: commitHash,
+			notes: fmt.Sprintf("merged as %s but live update incomplete: %s — resolve manually; branch %s preserved",
+				shortHash(commitHash), mergeErr, branch)}
+	}
+	if len(conflicts) > 0 {
+		removeWorktreeOnly(projectRoot, snag.ID) // keep branch for recovery
+		return snagDoneMsg{snagID: snag.ID, success: true, conflict: true, commitHash: commitHash,
+			notes: fmt.Sprintf("merged as %s with conflict markers in %s — resolve them; branch %s preserved",
+				shortHash(commitHash), strings.Join(conflicts, ", "), branch)}
+	}
+
+	removeWorktree(projectRoot, snag.ID) // full success: delete branch
+	return snagDoneMsg{snagID: snag.ID, success: true, commitHash: commitHash, notes: notes}
+}
+
+func shortHash(h string) string {
+	if len(h) > 7 {
+		return h[:7]
+	}
+	return h
+}
