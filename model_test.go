@@ -1045,3 +1045,24 @@ func TestDetailsHeaderShowsDurationForFinished(t *testing.T) {
 		t.Errorf("expected no duration line without data, got:\n%s", header)
 	}
 }
+
+func TestSnagDoneMsgConflictKeepsBranchNoAutoMerge(t *testing.T) {
+	snags := []Snag{{ID: "abc", Status: StatusInflight, Description: "the task", Source: SourceMarker, File: "main.go"}}
+	m := newTestModel(snags)
+	m.working = true
+	m = update(m, snagDoneMsg{snagID: "abc", success: true, conflict: true, commitHash: "deadbeef",
+		notes: "merged as deadbee with conflict markers in main.go"})
+
+	if m.state.Snags[0].Status != StatusComplete {
+		t.Errorf("expected complete, got %q", m.state.Snags[0].Status)
+	}
+	if m.state.Snags[0].Branch != "snag/abc" {
+		t.Errorf("expected branch preserved on conflict, got %q", m.state.Snags[0].Branch)
+	}
+	if m.state.Snags[0].CommitHash != "deadbeef" {
+		t.Errorf("expected commit recorded, got %q", m.state.Snags[0].CommitHash)
+	}
+	if m.mergingID != "" {
+		t.Errorf("conflict-success must not auto-start agentic, mergingID=%q", m.mergingID)
+	}
+}

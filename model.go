@@ -210,12 +210,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.state.Snags[i].ID == msg.snagID {
 				if msg.success {
 					m.state.Snags[i].Status = StatusComplete
-					// The branch is deleted on a successful merge.
-					m.state.Snags[i].Branch = ""
+					if msg.conflict {
+						// Commit landed but the live-tree update left conflict
+						// markers; keep the branch for inspection/recovery.
+						m.state.Snags[i].Branch = "snag/" + msg.snagID
+					} else {
+						// The branch is deleted on a clean successful merge.
+						m.state.Snags[i].Branch = ""
+					}
 					m.state.Snags[i].CommitHash = msg.commitHash
 					m.sessionCompletedIDs[msg.snagID] = true
 					if debugLog != nil {
-						debugLog.Printf("state change snag=%s inflight → complete hash=%s", msg.snagID, msg.commitHash)
+						debugLog.Printf("state change snag=%s inflight → complete hash=%s conflict=%v", msg.snagID, msg.commitHash, msg.conflict)
 					}
 				} else {
 					m.state.Snags[i].Status = StatusFailed
