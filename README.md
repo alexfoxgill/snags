@@ -16,11 +16,9 @@ go install .
 
 ## Usage
 
-Run `snags` from inside any git repository:
+Run `snags` from inside any git repository.
 
-```sh
-snags
-```
+![screenshot](screenshot.png)
 
 Type a task description and press **Enter** to add it to the queue. Snags are processed one at a time automatically.
 
