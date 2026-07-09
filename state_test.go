@@ -166,7 +166,7 @@ func TestLoadStateClearsStaleBranchOnFinishedSnags(t *testing.T) {
 }
 
 func TestEnsureSnagDirCreatesDir(t *testing.T) {
-	dir := t.TempDir()
+	dir := initScannerRepo(t)
 	if err := EnsureSnagDir(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -175,37 +175,40 @@ func TestEnsureSnagDirCreatesDir(t *testing.T) {
 	}
 }
 
-func TestEnsureSnagDirAddsGitignore(t *testing.T) {
-	dir := t.TempDir()
+func TestEnsureSnagDirAddsGitExclude(t *testing.T) {
+	dir := initScannerRepo(t)
 	if err := EnsureSnagDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	content, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	content, err := os.ReadFile(filepath.Join(dir, ".git", "info", "exclude"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(content), ".snags/") {
-		t.Error("expected .snags/ in .gitignore")
+		t.Error("expected .snags/ in .git/info/exclude")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gitignore")); !os.IsNotExist(err) {
+		t.Error("expected .gitignore not to be created")
 	}
 }
 
 func TestEnsureSnagDirIdempotent(t *testing.T) {
-	dir := t.TempDir()
+	dir := initScannerRepo(t)
 	if err := EnsureSnagDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	if err := EnsureSnagDir(dir); err != nil {
 		t.Error("second call should not error")
 	}
-	content, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	content, _ := os.ReadFile(filepath.Join(dir, ".git", "info", "exclude"))
 	count := strings.Count(string(content), ".snags/")
 	if count != 1 {
-		t.Errorf("expected .snags/ to appear once in .gitignore, got %d", count)
+		t.Errorf("expected .snags/ to appear once in .git/info/exclude, got %d", count)
 	}
 }
 
 func TestEnsureSnagDirCreatesLogs(t *testing.T) {
-	dir := t.TempDir()
+	dir := initScannerRepo(t)
 	if err := EnsureSnagDir(dir); err != nil {
 		t.Fatal(err)
 	}

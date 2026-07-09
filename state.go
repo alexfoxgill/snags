@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -138,19 +139,41 @@ func snagLogFile(projectRoot, snagID string) string {
 	return filepath.Join(snagDir(projectRoot), "logs", snagID+".jsonl")
 }
 
+// gitExcludePath returns the path to the repo's info/exclude file, resolving
+// the shared git directory so it works from worktrees as well as the main repo.
+func gitExcludePath(projectRoot string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--git-common-dir")
+	cmd.Dir = projectRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	gitDir := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(projectRoot, gitDir)
+	}
+	return filepath.Join(gitDir, "info", "exclude"), nil
+}
+
 func EnsureSnagDir(projectRoot string) error {
 	if err := os.MkdirAll(filepath.Join(snagDir(projectRoot), "logs"), 0755); err != nil {
 		return err
 	}
-	gitignorePath := filepath.Join(projectRoot, ".gitignore")
-	content, err := os.ReadFile(gitignorePath)
+	excludePath, err := gitExcludePath(projectRoot)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0755); err != nil {
+		return err
+	}
+	content, err := os.ReadFile(excludePath)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	if strings.Contains(string(content), ".snags/") {
 		return nil
 	}
-	f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
